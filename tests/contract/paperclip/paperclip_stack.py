@@ -6,7 +6,7 @@ ordinary second agent that Mandate must not be able to assign work to.
 """
 
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -37,6 +37,8 @@ class MandateIdentity:
     other_token_file: Path
     token_file: Path
     board_user_id: str
+    board_email: str
+    board_password: str = field(repr=False)
 
 
 _ALL_SKILL_ACTIONS = [
@@ -51,14 +53,25 @@ _ALL_SKILL_ACTIONS = [
 ]
 
 
+_PROVISIONED: dict[str, MandateIdentity] = {}
+
+
+def provision_once(base_url: str, token_file: Path) -> MandateIdentity:
+    """The identity for this Paperclip, provisioned on first use: a fresh instance can be claimed once."""
+    if base_url not in _PROVISIONED:
+        _PROVISIONED[base_url] = provision_mandate_identity(base_url, token_file)
+    return _PROVISIONED[base_url]
+
+
 def provision_mandate_identity(base_url: str, token_file: Path) -> MandateIdentity:
     """Create the company, project and agents, restrict Mandate's agent, and write its token."""
     headers = {"Origin": base_url}
     password = secrets.token_hex(16)
+    board_email = "board@contract.test"
     with httpx.Client(base_url=base_url, headers=headers, timeout=60) as board:
         signed_up = board.post(
             "/api/auth/sign-up/email",
-            json={"email": "board@contract.test", "password": password, "name": "Board"},
+            json={"email": board_email, "password": password, "name": "Board"},
         ).raise_for_status()
         board_user_id = _Id.model_validate(signed_up.json()["user"]).id
         board.post("/api/bootstrap/claim", json={}).raise_for_status()
@@ -119,6 +132,8 @@ def provision_mandate_identity(base_url: str, token_file: Path) -> MandateIdenti
         other_token_file=other_token_file,
         token_file=token_file,
         board_user_id=board_user_id,
+        board_email=board_email,
+        board_password=password,
     )
 
 
