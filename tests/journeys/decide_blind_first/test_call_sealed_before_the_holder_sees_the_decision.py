@@ -76,7 +76,7 @@ _NOTE = f"role-note-{secrets.token_hex(6)}"
 
 @pytest.fixture(name="database")
 def throwaway_database(
-    journey_stack: StackAddresses, monkeypatch: pytest.MonkeyPatch
+    journey_stack: StackAddresses, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Iterator[str]:
     """A migrated database on the stack's Postgres, with mandate_app able to log in."""
     name = f"gate_{uuid.uuid4().hex[:10]}"
@@ -92,14 +92,18 @@ def throwaway_database(
     engine = create_engine(url, isolation_level="AUTOCOMMIT")
     with engine.connect() as connection:
         connection.execute(text(f'CREATE DATABASE "{name}"'))
+    admin_file = tmp_path / "admin-password"
+    admin_file.write_text(journey_stack.postgres_password)
+    app_file = tmp_path / "app-password"
+    app_file.write_text(app_password)
     migrate_env = {
         **os.environ,
         "POSTGRES_HOST": "127.0.0.1",
         "POSTGRES_PORT": str(journey_stack.postgres_port),
         "POSTGRES_USER": journey_stack.postgres_user,
-        "POSTGRES_PASSWORD": journey_stack.postgres_password,
+        "POSTGRES_PASSWORD_FILE": str(admin_file),
         "POSTGRES_MIGRATION_USER": journey_stack.postgres_user,
-        "POSTGRES_MIGRATION_PASSWORD": journey_stack.postgres_password,
+        "POSTGRES_MIGRATION_PASSWORD_FILE": str(admin_file),
         "POSTGRES_DB": name,
     }
     subprocess.run(
@@ -112,7 +116,7 @@ def throwaway_database(
     monkeypatch.setenv("POSTGRES_HOST", "127.0.0.1")
     monkeypatch.setenv("POSTGRES_PORT", str(journey_stack.postgres_port))
     monkeypatch.setenv("POSTGRES_USER", "mandate_app")
-    monkeypatch.setenv("POSTGRES_PASSWORD", app_password)
+    monkeypatch.setenv("POSTGRES_PASSWORD_FILE", str(app_file))
     monkeypatch.setenv("POSTGRES_DB", name)
     BaseSettings.clear_instances()
     yield name
