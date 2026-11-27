@@ -18,7 +18,7 @@ from src.business_services.programmes.programme_from_meta_service import (
 )
 from src.exceptions.app_exceptions import BaseAppException
 from src.infra_services.paperclip_service import PaperclipError, PaperclipService
-from src.models.paperclip_models import PaperclipAgent
+from src.models.paperclip_models import PaperclipAgent, SkillPolicy, SkillPolicySubject
 from src.models.programme_models import (
     Programme,
     ReadinessCheckType,
@@ -162,10 +162,16 @@ class ProgrammeReadinessService(BaseBusinessService):
         subject = ReadinessCheckType.MANDATE_AGENT_LIMITS
         try:
             agent = await self._paperclip.get_agent(agent_id)
+            holder = await self._paperclip.get_own_agent()
+            policy = await self._paperclip.get_skill_policy()
             interactions = (await self._paperclip.get_interaction_permissions(agent_id)).effective
         except PaperclipError as error:
             return [_failure(subject, agent_id, f"cannot read the agent's limits: {error}")]
         causes: list[str] = []
+        if holder.id != agent.id:
+            causes.append(
+                f"the token belongs to agent {holder.name}, not to Mandate's agent {agent.name}"
+            )
         if agent.permissions.can_create_agents:
             causes.append("it may create agents")
         if interactions.can_assign_tasks_to_agents:
@@ -180,6 +186,7 @@ class ProgrammeReadinessService(BaseBusinessService):
                 continue
             if decision.allowed:
                 causes.append(f"Paperclip allows it {action} ({decision.reason})")
+        causes.extend(scoped_allow_causes(policy, agent))
         return [_failure(subject, agent.name, cause) for cause in causes]
 
 
@@ -187,6 +194,28 @@ def agent_unusable_cause(agent: PaperclipAgent) -> str | None:
     if agent.lifecycle_state != "ready" or agent.status not in _USABLE_STATUSES:
         return f"agent {agent.name} is not usable: status {agent.status}, state {agent.lifecycle_state}"
     return None
+
+
+def scoped_allow_causes(policy: SkillPolicy, agent: PaperclipAgent) -> list[str]:
+    """Name each allow rule limited to some skills that covers the agent for a skill action.
+
+    Paperclip's answer for an unscoped request skips such rules, so they are read from the policy.
+    """
+    return [
+        f"allow rule {rule.id} with a resource selector covers it for {action}"
+        for rule in policy.rules
+        if rule.effect == "allow" and rule.resources and _subject_matches(rule.subject, agent)
+        for action in sorted(_SKILL_ACTIONS & set(rule.actions))
+    ]
+
+
+def _subject_matches(subject: SkillPolicySubject, agent: PaperclipAgent) -> bool:
+    if subject.type == "all_agents":
+        return True
+    if subject.type == "agents":
+        return agent.id in subject.agent_ids
+    role = agent.role.strip().lower()
+    return bool(role) and any(r.strip().lower() == role for r in subject.roles)
 
 
 def _failure(check: ReadinessCheckType, subject: str, cause: str) -> ReadinessFailure:

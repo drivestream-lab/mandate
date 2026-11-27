@@ -106,7 +106,11 @@ async def test_an_agent_that_can_create_agents_or_assign_tasks_fails_readiness(
     repository_access: GitHubRepositoryAccess,
 ) -> None:
     unrestricted = PaperclipService(
-        settings_for(mandate_identity, agent_id=mandate_identity.other_agent_id)
+        settings_for(
+            mandate_identity,
+            agent_id=mandate_identity.other_agent_id,
+            token_file=mandate_identity.other_token_file,
+        )
     )
     await unrestricted.initialize()
     try:
@@ -116,8 +120,29 @@ async def test_an_agent_that_can_create_agents_or_assign_tasks_fails_readiness(
 
     assert {f.check for f in report.failures} == {ReadinessCheckType.MANDATE_AGENT_LIMITS}
     causes = " | ".join(f.cause for f in report.failures)
-    for expected in ("create agents", "assign tasks to agents"):
+    for expected in ("create agents", "assign tasks to agents", "Paperclip allows it skills"):
         assert expected in causes
+
+
+@pytest.mark.req("REQ-40")
+async def test_a_token_that_is_not_the_configured_agents_fails_readiness(
+    programme: Programme,
+    mandate_identity: MandateIdentity,
+    repository_access: GitHubRepositoryAccess,
+) -> None:
+    mismatched = PaperclipService(
+        settings_for(mandate_identity, agent_id=mandate_identity.other_agent_id)
+    )
+    await mismatched.initialize()
+    try:
+        report = await ProgrammeReadinessService(mismatched, repository_access).check(programme)
+    finally:
+        await mismatched.close()
+
+    assert any(
+        "token belongs to agent Mandate, not to Mandate's agent Other" in f.cause
+        for f in report.failures
+    )
 
 
 @pytest.mark.req("REQ-40")

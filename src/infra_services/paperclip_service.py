@@ -43,6 +43,7 @@ from src.models.paperclip_models import (
     QuestionRequest,
     QuestionSpec,
     SkillDecision,
+    SkillPolicy,
     SkillEvaluationRequest,
     WakeupRequest,
 )
@@ -247,6 +248,14 @@ class PaperclipService(BaseInfraService):
     async def get_interaction_permissions(self, agent_id: str) -> InteractionPermissions:
         path = f"/api/agents/{agent_id}/interaction-permissions"
         return self._parse(InteractionPermissions, await self._read(path), path)
+
+    async def get_own_agent(self) -> PaperclipAgent:
+        """The agent the token belongs to, as Paperclip sees it."""
+        return await self.get_agent("me")
+
+    async def get_skill_policy(self) -> SkillPolicy:
+        path = f"/api/companies/{self._settings.company_id}/skill-policy"
+        return self._parse(SkillPolicy, await self._read(path), path)
 
     async def evaluate_skill_action(self, action: str) -> SkillDecision:
         """Ask Paperclip whether Mandate's agent may take this skill action; it decides, not Mandate."""
