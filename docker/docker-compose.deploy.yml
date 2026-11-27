@@ -1,0 +1,69 @@
+# make deploy: the branch built from the Dockerfile and run with its .env, on its own
+# Postgres and Redis. Used locally and by mandate-runner on every PR (inside its sandbox).
+# After a merge into develop the runner deploys to the lab stack itself and does not use
+# this file.
+#
+# Settings come from .env.example, then .env when present; the database and Redis hosts
+# are this stack's own services.
+name: mandate-deploy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ds_mandate_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ds_mandate_db"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  mandate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      # In the runner's sandbox the only way out is its egress proxy; elsewhere these are empty.
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    image: drivestream-lab/mandate:deploy
+    env_file:
+      - path: ../.env.example
+      - path: ../.env
+        required: false
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ds_mandate_db
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      APP_PORT: "8000"
+      # The image holds no test files; the deploy stack mounts the public test key.
+      JWT_PUBLIC_KEY_PATH: /app/config/jwt_public.pem
+    volumes:
+      - ../tests/fixtures/jwt_public.pem:/app/config/jwt_public.pem:ro
+    ports:
+      - "127.0.0.1:${MANDATE_DEPLOY_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
