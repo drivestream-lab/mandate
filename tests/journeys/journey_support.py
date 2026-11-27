@@ -4,6 +4,7 @@ Everything here is plain code the fixtures in conftest.py assemble. A token or k
 printed; objects that hold one redact it in their repr.
 """
 
+import base64
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,10 +76,12 @@ class _RepoInfo(BaseModel):
     default_branch: str
 
 
-class _IssueSummary(BaseModel):
+class _Numbered(BaseModel):
     number: int
-    title: str
-    pull_request: dict[str, str] | None = None
+
+
+class _StateOnly(BaseModel):
+    state: str
 
 
 class AppCredentials:
@@ -126,6 +129,7 @@ class SandboxGitHub:
         self._credentials = credentials
         self._namespace = namespace
         self._created_issues: list[tuple[str, int]] = []
+        self._created_pulls: list[tuple[str, int]] = []
 
     def __repr__(self) -> str:
         return f"SandboxGitHub(namespace={self._namespace.prefix!r})"
@@ -164,31 +168,83 @@ class SandboxGitHub:
                 f"/{repo}/issues",
                 json={"title": self._namespace.issue_title(title), "body": body},
             ).raise_for_status()
-        number = int(response.json()["number"])
+        number = _Numbered.model_validate_json(response.content).number
         self._created_issues.append((repo, number))
         return number
 
     def issue_state(self, repo: str, number: int) -> str:
         with self._client() as client:
-            return str(client.get(f"/{repo}/issues/{number}").raise_for_status().json()["state"])
+            response = client.get(f"/{repo}/issues/{number}").raise_for_status()
+        return _StateOnly.model_validate_json(response.content).state
+
+    def create_pull_request(self, repo: str, branch: str) -> int:
+        """Commit a file on the run's branch and open a pull request from it into the default."""
+        with self._client() as client:
+            info = _RepoInfo.model_validate_json(client.get(f"/{repo}").raise_for_status().content)
+            client.put(
+                f"/{repo}/contents/{self._namespace.prefix}.txt",
+                json={
+                    "message": f"{self._namespace.prefix} journey file",
+                    "content": base64.b64encode(self._namespace.prefix.encode()).decode(),
+                    "branch": branch,
+                },
+            ).raise_for_status()
+            response = client.post(
+                f"/{repo}/pulls",
+                json={
+                    "title": self._namespace.issue_title("pull request"),
+                    "head": branch,
+                    "base": info.default_branch,
+                },
+            ).raise_for_status()
+        number = _Numbered.model_validate_json(response.content).number
+        self._created_pulls.append((repo, number))
+        return number
+
+    def pull_request_state(self, repo: str, number: int) -> str:
+        with self._client() as client:
+            response = client.get(f"/{repo}/pulls/{number}").raise_for_status()
+        return _StateOnly.model_validate_json(response.content).state
 
     def cleanup(self) -> None:
-        """Delete this run's branches and close its issues. Safe to call more than once."""
+        """Close this run's pull requests and issues and delete its branches.
+
+        Safe to call more than once. Every step is attempted; any failure is collected and
+        raised together at the end, so one bad call never leaves the rest of the run behind.
+        """
+        failures: list[str] = []
         with self._client() as client:
+            for repo, number in self._created_pulls:
+                _check(client.patch(f"/{repo}/pulls/{number}", json={"state": "closed"}), failures)
             for repo in SANDBOX_REPOS:
                 refs_url = f"/{repo}/git/matching-refs/heads/{self._namespace.prefix}/"
-                for ref in _refs(client.get(refs_url).raise_for_status().content):
-                    client.delete(f"/{repo}/git/{ref.ref}")
-                listing = client.get(f"/{repo}/issues", params={"state": "open", "per_page": 100})
-                for issue in _issues(listing.raise_for_status().content):
-                    if issue.pull_request is None and issue.title.startswith(
-                        f"[{self._namespace.prefix}]"
-                    ):
-                        client.patch(
-                            f"/{repo}/issues/{issue.number}",
-                            json={"state": "closed", "state_reason": "not_planned"},
-                        )
+                listing = client.get(refs_url)
+                if not _check(listing, failures):
+                    continue
+                for ref in _refs(listing.content):
+                    _check(client.delete(f"/{repo}/git/{ref.ref}"), failures)
+            for repo, number in self._created_issues:
+                _check(
+                    client.patch(
+                        f"/{repo}/issues/{number}",
+                        json={"state": "closed", "state_reason": "not_planned"},
+                    ),
+                    failures,
+                )
+        if failures:
+            raise RuntimeError("sandbox cleanup failed: " + "; ".join(failures))
+        self._created_pulls.clear()
         self._created_issues.clear()
+
+
+def _check(response: httpx.Response, failures: list[str]) -> bool:
+    """Record a failed response (status and request only, never a body or header)."""
+    if response.is_success:
+        return True
+    failures.append(
+        f"{response.request.method} {response.request.url.path} -> {response.status_code}"
+    )
+    return False
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -201,9 +257,3 @@ def _headers(token: str) -> dict[str, str]:
 
 def _refs(payload: bytes) -> list[_Ref]:
     return [_Ref.model_validate(item) for item in httpx.Response(200, content=payload).json()]
-
-
-def _issues(payload: bytes) -> list[_IssueSummary]:
-    return [
-        _IssueSummary.model_validate(item) for item in httpx.Response(200, content=payload).json()
-    ]

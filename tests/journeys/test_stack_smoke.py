@@ -59,14 +59,20 @@ def test_test_app_mints_an_installation_token_for_the_sandbox_repos(
 def test_run_github_work_is_namespaced_and_removed_at_cleanup(
     sandbox_github: SandboxGitHub, run_namespace: RunNamespace
 ) -> None:
-    branch = sandbox_github.create_branch(SANDBOX_REPOS[0], "smoke")
-    issue = sandbox_github.create_issue(SANDBOX_REPOS[1], "smoke")
+    svc, meta = SANDBOX_REPOS
+    branch = sandbox_github.create_branch(svc, "smoke")
+    pull_request = sandbox_github.create_pull_request(svc, branch)
+    svc_issue = sandbox_github.create_issue(svc, "smoke")
+    meta_issue = sandbox_github.create_issue(meta, "smoke")
 
     assert branch.startswith(f"{run_namespace.prefix}/")
-    assert sandbox_github.branch_exists(SANDBOX_REPOS[0], branch)
-    assert sandbox_github.issue_state(SANDBOX_REPOS[1], issue) == "open"
+    assert sandbox_github.branch_exists(svc, branch)
+    assert sandbox_github.pull_request_state(svc, pull_request) == "open"
+    assert sandbox_github.issue_state(meta, meta_issue) == "open"
 
     sandbox_github.cleanup()
 
-    assert not sandbox_github.branch_exists(SANDBOX_REPOS[0], branch)
-    assert sandbox_github.issue_state(SANDBOX_REPOS[1], issue) == "closed"
+    assert not sandbox_github.branch_exists(svc, branch)
+    assert sandbox_github.pull_request_state(svc, pull_request) == "closed"
+    assert sandbox_github.issue_state(svc, svc_issue) == "closed"
+    assert sandbox_github.issue_state(meta, meta_issue) == "closed"

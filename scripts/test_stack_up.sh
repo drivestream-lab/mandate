@@ -21,6 +21,9 @@ export STACK_AUTH_SECRET="${STACK_AUTH_SECRET:-$(openssl rand -hex 32)}"
 export STACK_SIGNING_SECRET="${STACK_SIGNING_SECRET:-$(openssl rand -hex 32)}"
 compose=(docker compose -p "$project" -f "$compose_file")
 
+# An interrupt while the stack starts removes what already exists (down is safe to repeat).
+trap '"$here/test_stack_down.sh" "$run_id" >&2 || true; exit 130' INT TERM
+
 if ! "${compose[@]}" up -d --wait --wait-timeout 240 >&2; then
   echo "test_stack_up.sh: the stack did not become healthy; logs follow" >&2
   "${compose[@]}" logs --no-color --tail 40 2>&1 \

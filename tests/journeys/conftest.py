@@ -13,10 +13,12 @@ that namespace. The test App's credentials are read by path from ~/.mandate/secr
 
 import os
 import secrets
+import signal
 import subprocess
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from types import FrameType
 
 import pytest
 
@@ -47,20 +49,31 @@ def run_namespace() -> RunNamespace:
     return RunNamespace(run_id=uuid.uuid4().hex[:10])
 
 
+def _interrupt_on_terminate(signum: int, frame: FrameType | None) -> None:
+    """Treat SIGTERM like Ctrl-C so the teardown below always runs."""
+    raise KeyboardInterrupt
+
+
 @pytest.fixture(scope="session", autouse=True)
 def journey_stack(run_namespace: RunNamespace) -> Iterator[StackAddresses]:
-    """Bring the run's stack up, and take it down afterwards whatever the outcome."""
+    """Bring the run's stack up, and take it down afterwards whatever the outcome.
+
+    The try opens before the up call, so a failure or an interrupt (SIGINT or SIGTERM) while
+    the stack starts is torn down too; the down script is safe on a stack that is half up or
+    absent. A teardown that fails is reported and fails the session.
+    """
     run_id = run_namespace.run_id
     password = secrets.token_hex(16)
     env = _scripts_env(password)
-    up = subprocess.run(
-        [str(_ROOT / "scripts" / "test_stack_up.sh"), run_id],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    previous_handler = signal.signal(signal.SIGTERM, _interrupt_on_terminate)
     try:
+        up = subprocess.run(
+            [str(_ROOT / "scripts" / "test_stack_up.sh"), run_id],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if up.returncode != 0:
             pytest.exit(
                 f"journey stack failed to start:\n{up.stderr[-2000:].replace(password, '<redacted>')}",
@@ -77,12 +90,17 @@ def journey_stack(run_namespace: RunNamespace) -> Iterator[StackAddresses]:
             postgres_password=password,
         )
     finally:
-        subprocess.run(
+        down = subprocess.run(
             [str(_ROOT / "scripts" / "test_stack_down.sh"), run_id],
             env=env,
             capture_output=True,
+            text=True,
             check=False,
         )
+        signal.signal(signal.SIGTERM, previous_handler)
+        if down.returncode != 0:
+            detail = down.stderr[-2000:].replace(password, "<redacted>")
+            raise RuntimeError(f"journey stack teardown failed for {run_id}:\n{detail}")
 
 
 @pytest.fixture(scope="session")
