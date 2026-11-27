@@ -1,7 +1,7 @@
 """create capability schemas and grants
 
 One Postgres schema per capability, tables owned by mandate_owner, the runtime role
-mandate_app limited to INSERT and SELECT on ledger.entries, and a trigger that refuses
+mandate_app limited to SELECT and a column-limited INSERT on ledger.entries, and a trigger that refuses
 UPDATE, DELETE and TRUNCATE on ledger.entries for every role.
 
 Roles. The lab (dev-infra-lab) and the deploy stack (docker/postgres) create the two login
@@ -19,9 +19,18 @@ and deletes it before it ends:
     INSERT INTO ledger.rewrite_permits (transaction_id, reason)
     VALUES (txid_current(), 'why this migration rewrites the ledger');
 
-A session setting, a role attribute or application_name cannot stand in for the mark.
-A database superuser can still disable the trigger; that is outside what a trigger can stop,
-and the hash chain and checkpoint detect it.
+A session setting, a role attribute or application_name cannot stand in for the mark. A
+BEFORE INSERT OR UPDATE trigger on the table accepts only a permit for txid_current(), so a
+permit cannot be planted for another transaction.
+
+What this does not stop. mandate_owner owns the table, and a table owner can always change the
+protection itself with its own DDL: ALTER TABLE ... DISABLE TRIGGER, DROP TRIGGER, replacing
+the trigger function, ALTER COLUMN ... TYPE ... USING (which rewrites rows without firing row
+triggers) and DROP TABLE. A superuser can also set session_replication_role. This is inherent
+in ADR-020's model, where mandate_owner owns every object, and no trigger can prevent it. The
+protection is that only the migration script uses mandate_owner, and that the hash chain and
+checkpoint (the ledger's hash chain task) detect any rewrite that does happen. mandate_app,
+the runtime role, has none of these abilities and cannot choose an entry's sequence or time.
 
 Revision ID: b84354c7f6e1
 Revises: 
@@ -34,6 +43,10 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+PERMIT_COMMENT = (
+    "A row for txid_current() lets a migration rewrite ledger.entries in that transaction. "
+    "Only the owner role can write it."
+)
 OWNER_ROLE = "mandate_owner"
 APP_ROLE = "mandate_app"
 
@@ -114,17 +127,18 @@ def upgrade() -> None:
     schema='runner'
     )
 
-    op.execute(
-        "CREATE TABLE ledger.rewrite_permits ("
-        "transaction_id bigint PRIMARY KEY, "
-        "reason text NOT NULL CHECK (length(reason) > 0), "
-        "marked_by name NOT NULL DEFAULT current_user, "
-        "marked_at timestamptz NOT NULL DEFAULT now())"
-    )
-    op.execute(
-        "COMMENT ON TABLE ledger.rewrite_permits IS "
-        "'A row for txid_current() lets a migration rewrite ledger.entries in that transaction. "
-        "Only the owner role can write it.'"
+    op.create_table(
+        "rewrite_permits",
+        sa.Column("transaction_id", sa.BigInteger(), autoincrement=False, nullable=False),
+        sa.Column("reason", sa.Text(), nullable=False),
+        sa.Column("marked_by", sa.Text(), server_default=sa.text("CURRENT_USER"), nullable=False),
+        sa.Column(
+            "marked_at", sa.TIMESTAMP(timezone=True), server_default=sa.text("now()"), nullable=False
+        ),
+        sa.CheckConstraint("length(reason) > 0", name="rewrite_permits_reason_not_empty"),
+        sa.PrimaryKeyConstraint("transaction_id"),
+        comment=PERMIT_COMMENT,
+        schema="ledger",
     )
     op.execute(
         """
@@ -146,6 +160,26 @@ def upgrade() -> None:
         """
     )
     op.execute("REVOKE ALL ON FUNCTION ledger.reject_entry_rewrite() FROM PUBLIC")
+    # A permit only counts for the transaction that writes it, so it cannot be planted ahead.
+    op.execute(
+        """
+        CREATE FUNCTION ledger.require_own_transaction() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $fn$
+        BEGIN
+            IF NEW.transaction_id IS DISTINCT FROM txid_current() THEN
+                RAISE EXCEPTION 'a rewrite permit is only valid for the current transaction'
+                    USING ERRCODE = 'check_violation';
+            END IF;
+            RETURN NEW;
+        END
+        $fn$
+        """
+    )
+    op.execute("REVOKE ALL ON FUNCTION ledger.require_own_transaction() FROM PUBLIC")
+    op.execute(
+        "CREATE TRIGGER rewrite_permits_own_transaction BEFORE INSERT OR UPDATE "
+        "ON ledger.rewrite_permits FOR EACH ROW EXECUTE FUNCTION ledger.require_own_transaction()"
+    )
     op.execute(
         "CREATE TRIGGER entries_reject_rewrite BEFORE UPDATE OR DELETE ON ledger.entries "
         "FOR EACH ROW EXECUTE FUNCTION ledger.reject_entry_rewrite()"
@@ -159,6 +193,7 @@ def upgrade() -> None:
     op.execute(f"ALTER TABLE ledger.entries OWNER TO {OWNER_ROLE}")
     op.execute(f"ALTER TABLE ledger.rewrite_permits OWNER TO {OWNER_ROLE}")
     op.execute(f"ALTER FUNCTION ledger.reject_entry_rewrite() OWNER TO {OWNER_ROLE}")
+    op.execute(f"ALTER FUNCTION ledger.require_own_transaction() OWNER TO {OWNER_ROLE}")
     for schema, table in (
         ("runner", "work_items"),
         ("gates", "gates"),
@@ -168,7 +203,14 @@ def upgrade() -> None:
 
     # Grants: the runtime role appends to and reads the ledger, nothing more.
     op.execute(f"REVOKE ALL ON ALL TABLES IN SCHEMA ledger FROM {APP_ROLE}")
-    op.execute(f"GRANT INSERT, SELECT ON ledger.entries TO {APP_ROLE}")
+    # INSERT by column: the sequence and recorded_at stay server-assigned, so the runtime role
+    # cannot backdate an entry or pick its place in the chain (OVERRIDING SYSTEM VALUE needs
+    # INSERT on the sequence column).
+    op.execute(f"GRANT SELECT ON ledger.entries TO {APP_ROLE}")
+    op.execute(
+        f"GRANT INSERT (entry_id, entry_type, payload, previous_hash, entry_hash) "
+        f"ON ledger.entries TO {APP_ROLE}"
+    )
     for schema in WRITABLE_SCHEMAS:
         op.execute(
             f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} "
@@ -182,6 +224,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema. Refuses while the ledger holds entries."""
+    # Lock first, so an insert cannot land between the check and the drop.
+    op.execute("LOCK TABLE ledger.entries IN ACCESS EXCLUSIVE MODE")
     op.execute(
         "DO $$ BEGIN IF EXISTS (SELECT 1 FROM ledger.entries) THEN "
         "RAISE EXCEPTION 'refusing to drop a ledger that holds entries'; END IF; END $$"
@@ -191,6 +235,7 @@ def downgrade() -> None:
     op.drop_table('entries', schema='ledger')
     op.drop_table('rewrite_permits', schema='ledger')
     op.execute("DROP FUNCTION ledger.reject_entry_rewrite()")
+    op.execute("DROP FUNCTION ledger.require_own_transaction()")
     op.drop_index(op.f('ix_gates_gates_work_item_id'), table_name='gates', schema='gates')
     op.drop_table('gates', schema='gates')
     for schema in reversed(CAPABILITY_SCHEMAS):

@@ -1,7 +1,8 @@
 """Journey: the runtime role cannot rewrite the ledger, and neither can the owner by accident.
 
 Runs against a real Postgres that already has the migration applied: the one `make deploy`
-starts, or the lab's. Connection settings come from the environment, never from the repo:
+starts. Never point it at the lab: every run appends probe entries, and ledger entries cannot
+be removed. Connection settings come from the environment, never from the repo:
 
     MANDATE_DB_HOST, MANDATE_DB_PORT, MANDATE_DB_NAME,
     MANDATE_DB_OWNER_PASSWORD, MANDATE_DB_APP_PASSWORD
@@ -140,7 +141,19 @@ def test_runtime_role_can_only_insert_and_select_on_the_ledger(
             {"role": APP_ROLE},
         ).all()
     }
-    assert privileges == {"INSERT", "SELECT"}
+    assert privileges == {"SELECT"}
+    insertable = {
+        row[0]
+        for row in owner.execute(
+            text(
+                "SELECT column_name FROM information_schema.column_privileges "
+                "WHERE table_schema = 'ledger' AND table_name = 'entries' "
+                "AND grantee = :role AND privilege_type = 'INSERT'"
+            ),
+            {"role": APP_ROLE},
+        ).all()
+    }
+    assert insertable == {"entry_id", "entry_type", "payload", "previous_hash", "entry_hash"}
     assert app.execute(text("SELECT count(*) FROM ledger.entries")).scalar_one() >= 0
 
 
@@ -197,3 +210,31 @@ def test_a_marked_owner_transaction_can_rewrite_and_the_mark_ends_with_it(
 
     assert _payload(owner, entry_id) == '{"n": 1}'
     assert "append-only" in _refused(owner, _UPDATE, entry_id)
+
+
+@pytest.mark.req("REQ-55")
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO ledger.entries (sequence, entry_type, payload) "
+        "OVERRIDING SYSTEM VALUE VALUES (900000, 'journey_probe', CAST('{}' AS jsonb))",
+        "INSERT INTO ledger.entries (sequence, entry_type, payload) "
+        "VALUES (900001, 'journey_probe', CAST('{}' AS jsonb))",
+        "INSERT INTO ledger.entries (entry_type, payload, recorded_at) "
+        "VALUES ('journey_probe', CAST('{}' AS jsonb), '2020-01-01')",
+    ],
+)
+def test_runtime_role_cannot_choose_an_entry_sequence_or_time(
+    app: Connection, statement: str
+) -> None:
+    refusal = _refused(app, statement, uuid.uuid4())
+    assert "permission denied" in refusal or "non-DEFAULT value" in refusal
+
+
+@pytest.mark.req("REQ-55")
+def test_a_permit_for_another_transaction_is_refused(owner: Connection) -> None:
+    planted = (
+        "INSERT INTO ledger.rewrite_permits (transaction_id, reason) "
+        "VALUES (txid_current() + 2, 'planted for later')"
+    )
+    assert "only valid for the current transaction" in _refused(owner, planted, uuid.uuid4())

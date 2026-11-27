@@ -1,8 +1,15 @@
 """The ledger's one table. Append-only: the runtime role may only insert and select.
 
-The database refuses UPDATE, DELETE and TRUNCATE here for every role, the owner included,
-except inside a migration that marks its own transaction for it (see the migration that
-creates the capability schemas). The hash chain over these rows is built on top of this table.
+The database refuses UPDATE, DELETE and TRUNCATE here for every role except inside a
+migration that marks its own transaction for it (ledger.rewrite_permits). mandate_app may
+only select, and insert the columns it supplies; the sequence and recorded_at are assigned by
+the database.
+
+The owner role is not stopped by this. mandate_owner owns the table, so it can disable or
+drop the trigger, replace its function, rewrite a column with ALTER COLUMN ... USING, or drop
+the table; a superuser can also use session_replication_role. That is inherent in ADR-020's
+ownership model. mandate_owner is used only by the migration script, and the hash chain over
+these rows is what detects a rewrite that does happen.
 """
 
 import uuid

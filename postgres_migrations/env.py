@@ -12,6 +12,7 @@ from src.configs.postgres_settings import PostgresSettings
 from src.database.postgres.schema.base_postgres_schema import postgres_metadata
 from src.database.postgres.schema.gates import gate_schema  # noqa: F401
 from src.database.postgres.schema.ledger import ledger_entry_schema  # noqa: F401
+from src.database.postgres.schema.ledger import rewrite_permit_schema  # noqa: F401
 from src.database.postgres.schema.outbox import outbox_message_schema  # noqa: F401
 from src.database.postgres.schema.runner import work_item_schema  # noqa: F401
 
