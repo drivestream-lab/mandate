@@ -1,7 +1,8 @@
 """API utilities and helpers for Parichay."""
 
 from functools import wraps
-from typing import Any, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any, ParamSpec, TypeVar
 
 from fastapi import HTTPException
 
@@ -9,6 +10,9 @@ from src.logging import get_logger
 from src.exceptions.app_exceptions import BaseAppException
 
 logger = get_logger()
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 def _path_log_context(kwargs: dict[str, Any]) -> dict[str, str]:
@@ -21,12 +25,14 @@ def _path_log_context(kwargs: dict[str, Any]) -> dict[str, str]:
     return context
 
 
-def handle_api_errors(operation_name: str, error_context: str = "API"):
+def handle_api_errors(
+    operation_name: str, error_context: str = "API"
+) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Decorator for consistent error handling across API endpoints."""
 
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
         @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             path_context = _path_log_context(kwargs)
             try:
                 return await func(*args, **kwargs)

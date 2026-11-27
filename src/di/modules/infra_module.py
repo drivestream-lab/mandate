@@ -1,6 +1,6 @@
 """Infrastructure services module for dependency injection."""
 
-from injector import Module, singleton
+from injector import Binder, Module, singleton
 
 from src.database.postgres.connection_manager import PostgresConnectionManager
 from src.database.redis.connection_manager import RedisConnectionManager
@@ -15,7 +15,7 @@ logger = get_logger()
 class InfraModule(Module):
     """Register core infrastructure services."""
 
-    def configure(self, binder) -> None:
+    def configure(self, binder: Binder) -> None:
         logger.info("Configuring infrastructure services module")
         binder.bind(PostgresConnectionManager, to=PostgresConnectionManager, scope=singleton)
         binder.bind(RedisConnectionManager, to=RedisConnectionManager, scope=singleton)

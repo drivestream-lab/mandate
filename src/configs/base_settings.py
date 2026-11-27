@@ -18,8 +18,8 @@ class BaseSettings(PydanticBaseSettings, ABC):
     PREFIX: ClassVar[str] = ""
     _instances: ClassVar[Dict[str, "BaseSettings"]] = {}
 
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
         prefix = getattr(cls, "PREFIX", "")
         if not prefix:
             raise ValueError(f"{cls.__name__} must define a non-empty PREFIX class variable")
@@ -40,3 +40,8 @@ class BaseSettings(PydanticBaseSettings, ABC):
         if class_name not in cls._instances:
             cls._instances[class_name] = cls()
         return cast(T, cls._instances[class_name])
+
+    @classmethod
+    def clear_instances(cls) -> None:
+        """Forget every cached settings instance (tests reset configuration with this)."""
+        cls._instances.clear()

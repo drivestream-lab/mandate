@@ -1,4 +1,4 @@
-.PHONY: setup check check-ci format format-check lint lint-check types layers test run deploy deploy-down verify
+.PHONY: setup check check-ci format format-check lint lint-check types layers test journeys run deploy deploy-down verify
 
 setup:
 	@bash scripts/setup_dev.sh
@@ -26,7 +26,13 @@ layers:
 	.venv/bin/lint-imports
 
 test:
-	.venv/bin/pytest tests/unit/ -v
+	.venv/bin/pytest tests/unit/ -v --require-req-coverage
+
+# make journeys: the end-to-end journeys against the local ephemeral stack. Paths and pytest
+# options go in ARGS: make journeys ARGS="tests/journeys/foo.py -x". With none, every journey
+# under tests/journeys runs. (A later task builds the stack they run on.)
+journeys:
+	.venv/bin/pytest $(if $(ARGS),$(ARGS),tests/journeys) -v
 
 run:
 	.venv/bin/python -m src.main

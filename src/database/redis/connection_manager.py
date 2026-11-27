@@ -1,6 +1,7 @@
 """Redis connection manager for Parichay."""
 
-from typing import Optional
+from collections.abc import Awaitable
+from typing import Optional, Protocol
 
 from redis.asyncio import Redis
 
@@ -8,6 +9,16 @@ from src.configs.redis_settings import RedisSettings
 from src.logging import get_logger
 
 logger = get_logger()
+
+
+class _Pinger(Protocol):
+    """The one Redis call the health check makes, typed (redis-py leaves it untyped)."""
+
+    def ping(self) -> Awaitable[bool]: ...
+
+
+async def _ping(client: _Pinger) -> bool:
+    return bool(await client.ping())
 
 
 class RedisConnectionManager:
@@ -176,7 +187,7 @@ class RedisConnectionManager:
             return False
 
         try:
-            return await self._client.ping()
+            return await _ping(self._client)
         except Exception as e:
             logger.error("Redis health check failed", error=str(e))
             return False

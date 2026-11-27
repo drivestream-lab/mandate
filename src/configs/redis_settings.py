@@ -1,6 +1,6 @@
 """Redis settings module for Parichay."""
 
-from typing import Dict, Optional
+from typing import Optional
 
 from pydantic import Field, SecretStr, computed_field
 
@@ -51,9 +51,9 @@ class RedisSettings(BaseSettings):
 
     @computed_field
     @property
-    def connection_params(self) -> Dict:
+    def connection_params(self) -> dict[str, object]:
         """Get Redis connection parameters."""
-        params = {
+        params: dict[str, object] = {
             "host": self.host,
             "port": self.port,
             "db": self.db,

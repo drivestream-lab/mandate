@@ -86,7 +86,6 @@ def create_app() -> FastAPI:
     app.add_middleware(AuthMiddleware, config=auth_config)
     app.add_middleware(CorrelationIdMiddleware)
 
-    @app.exception_handler(BaseAppException)
     async def app_exception_handler(request: Request, exc: BaseAppException) -> JSONResponse:
         correlation_id = getattr(request.state, "correlation_id", "")
         logger.error(
@@ -105,6 +104,7 @@ def create_app() -> FastAPI:
             },
         )
 
+    app.exception_handler(BaseAppException)(app_exception_handler)
     app.include_router(health_router)
     app.include_router(internal_router)
     app.include_router(api_router, prefix="/api/v1")

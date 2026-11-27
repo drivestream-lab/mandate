@@ -1,11 +1,22 @@
 """PostgreSQL settings for mandate."""
 
-from typing import ClassVar, Dict, Optional
+from typing import ClassVar, Optional, TypedDict
 from urllib.parse import quote_plus
 
 from pydantic import Field, SecretStr, computed_field
 
 from src.configs.base_settings import BaseSettings
+
+
+class EngineArgs(TypedDict):
+    """Keyword arguments for create_async_engine."""
+
+    pool_pre_ping: bool
+    pool_size: int
+    max_overflow: int
+    pool_timeout: int
+    pool_recycle: int
+    connect_args: dict[str, object]
 
 
 class PostgresSettings(BaseSettings):
@@ -47,8 +58,8 @@ class PostgresSettings(BaseSettings):
 
     @computed_field
     @property
-    def sqlalchemy_engine_args(self) -> Dict:
-        connect_args = {
+    def sqlalchemy_engine_args(self) -> EngineArgs:
+        connect_args: dict[str, object] = {
             "timeout": self.connect_timeout,
             "command_timeout": self.command_timeout,
             "server_settings": {"application_name": "mandate"},
