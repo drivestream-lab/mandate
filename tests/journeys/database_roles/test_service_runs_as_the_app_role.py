@@ -264,6 +264,36 @@ def test_no_value_in_the_service_environment_logs_in_as_the_owner_or_the_superus
             },
             "POSTGRES_PASSWORD",
         ),
+        (
+            {
+                "POSTGRES_USER": "mandate_app",
+                "POSTGRES_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_MIGRATION_USER": "mandate_owner",
+                "POSTGRES_MIGRATION_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_PASSWORD": "",
+            },
+            "POSTGRES_PASSWORD",
+        ),
+        (
+            {
+                "POSTGRES_USER": "mandate_app",
+                "POSTGRES_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_MIGRATION_USER": "mandate_owner",
+                "POSTGRES_MIGRATION_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_MIGRATION_PASSWORD": "x",
+            },
+            "POSTGRES_MIGRATION_PASSWORD",
+        ),
+        (
+            {
+                "POSTGRES_USER": "mandate_app",
+                "POSTGRES_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_MIGRATION_USER": "mandate_owner",
+                "POSTGRES_MIGRATION_PASSWORD_FILE": "/etc/hostname",
+                "PGPASSWORD": "x",
+            },
+            "PGPASSWORD",
+        ),
     ],
 )
 def test_a_missing_credential_or_file_stops_the_start_and_names_it(
@@ -273,8 +303,40 @@ def test_a_missing_credential_or_file_stops_the_start_and_names_it(
     assert image
 
     env_args = [arg for key, value in env.items() for arg in ("-e", f"{key}={value}")]
-    started = _docker("run", "--rm", *env_args, image)
+    started = _docker("run", "--rm", "--user", "0:0", *env_args, image)
 
     assert started.returncode != 0
     assert named in started.stdout
     assert "PostgreSQL is ready" not in started.stdout
+
+
+@pytest.mark.req("REQ-55")
+def test_the_image_refuses_to_start_as_a_non_root_user(container: str) -> None:
+    image = _docker("inspect", "-f", "{{.Config.Image}}", container).stdout.strip()
+    env = {
+        "POSTGRES_USER": "mandate_app",
+        "POSTGRES_PASSWORD_FILE": "/etc/hostname",
+        "POSTGRES_MIGRATION_USER": "mandate_owner",
+        "POSTGRES_MIGRATION_PASSWORD_FILE": "/etc/hostname",
+    }
+    env_args = [arg for key, value in env.items() for arg in ("-e", f"{key}={value}")]
+
+    for user_args in ([], ["--user", "app"]):
+        started = _docker("run", "--rm", *user_args, *env_args, image)
+        assert started.returncode != 0
+        assert "must start as root" in started.stdout
+        assert "PostgreSQL is ready" not in started.stdout
+
+
+@pytest.mark.req("REQ-55")
+@pytest.mark.parametrize("directory", ["src", "scripts", "postgres_migrations"])
+def test_the_service_user_cannot_write_the_code_the_entrypoint_runs_as_root(
+    container: str, directory: str
+) -> None:
+    probe = _docker("exec", "-u", "app", container, "touch", f"/app/{directory}/probe")
+    assert probe.returncode != 0
+    overwrite = _docker(
+        "exec", "-u", "app", container, "sh", "-c",
+        f"find /app/{directory} -type f -writable | head -1",
+    )  # fmt: skip
+    assert overwrite.stdout.strip() == ""

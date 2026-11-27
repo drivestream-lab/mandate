@@ -55,10 +55,10 @@ class PostgresSettings(BaseSettings):
 
     @model_validator(mode="after")
     def refuse_passwords_in_the_environment(self) -> "PostgresSettings":
-        for key in ("POSTGRES_PASSWORD", "POSTGRES_MIGRATION_PASSWORD"):
+        for key in ("POSTGRES_PASSWORD", "POSTGRES_MIGRATION_PASSWORD", "PGPASSWORD"):
             if key in os.environ:
                 raise ValueError(
-                    f"{key} is set; passwords are read from {key}_FILE, never from the environment"
+                    f"{key} is set; passwords are read from the POSTGRES_*_FILE files, never from the environment"
                 )
         return self
 

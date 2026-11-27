@@ -3,6 +3,13 @@ set -e
 
 echo "[INFO] Starting mandate with database migrations"
 
+# The entrypoint must start as root: it reads both files, runs the migrations, then drops to
+# the app user for the service, so the owner's file can be mode 600 and unreadable to the
+# service. Started as anyone else it cannot hide that file, so it refuses.
+if [ "$(id -u)" != "0" ]; then
+    echo "[ERROR] must start as root to protect the owner password; refusing to start"
+    exit 1
+fi
 # Two credential sets, never mixed. The app's (POSTGRES_USER, POSTGRES_PASSWORD_FILE) is the
 # service's connection; the owner's (POSTGRES_MIGRATION_USER, POSTGRES_MIGRATION_PASSWORD_FILE)
 # runs the migrations only. Each password is a file read by path; no password travels as an
@@ -14,9 +21,9 @@ for key in POSTGRES_USER POSTGRES_PASSWORD_FILE POSTGRES_MIGRATION_USER POSTGRES
         exit 1
     fi
 done
-for key in POSTGRES_PASSWORD POSTGRES_MIGRATION_PASSWORD; do
+for key in POSTGRES_PASSWORD POSTGRES_MIGRATION_PASSWORD PGPASSWORD; do
     if [ -n "${!key+x}" ]; then
-        echo "[ERROR] ${key} is set; passwords are read from ${key}_FILE, never from the environment"
+        echo "[ERROR] ${key} is set; passwords are read from the POSTGRES_*_FILE files, never from the environment"
         exit 1
     fi
 done
@@ -27,16 +34,11 @@ for key in POSTGRES_PASSWORD_FILE POSTGRES_MIGRATION_PASSWORD_FILE; do
     fi
 done
 
-# Started as root, the entrypoint reads both files, runs the migrations, then drops to the
-# app user for the service, so the owner's file can be mode 600 and unreadable to the service.
 SERVICE_USER=app
-DROP=()
-if [ "$(id -u)" = "0" ]; then
-    DROP=(setpriv --reuid="${SERVICE_USER}" --regid="${SERVICE_USER}" --init-groups)
-    if "${DROP[@]}" test -r "${POSTGRES_MIGRATION_PASSWORD_FILE}"; then
-        echo "[ERROR] POSTGRES_MIGRATION_PASSWORD_FILE is readable by the service user; make it owner-only (mode 600, root)"
-        exit 1
-    fi
+DROP=(setpriv --reuid="${SERVICE_USER}" --regid="${SERVICE_USER}" --init-groups)
+if "${DROP[@]}" test -r "${POSTGRES_MIGRATION_PASSWORD_FILE}"; then
+    echo "[ERROR] POSTGRES_MIGRATION_PASSWORD_FILE is readable by the service user; make it owner-only (mode 600, root)"
+    exit 1
 fi
 
 wait_for_db() {

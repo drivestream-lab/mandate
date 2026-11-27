@@ -19,11 +19,13 @@ WORKDIR /app
 
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --chown=app:app src/ ./src/
-COPY --chown=app:app postgres_migrations/ ./postgres_migrations/
-COPY --chown=app:app scripts/ ./scripts/
+COPY src/ ./src/
+COPY postgres_migrations/ ./postgres_migrations/
+COPY scripts/ ./scripts/
 COPY docker/mandate/entrypoint.sh ./entrypoint.sh
-RUN chmod +x entrypoint.sh && chmod +x scripts/*.sh
+# Code is root-owned and not writable by the app user: the entrypoint runs scripts and
+# migrations as root, so the service must not be able to rewrite them.
+RUN chmod +x entrypoint.sh && chmod +x scripts/*.sh && chmod -R go-w src postgres_migrations scripts entrypoint.sh
 RUN mkdir -p logs && chown app:app logs
 
 USER app
