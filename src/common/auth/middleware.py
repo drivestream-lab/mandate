@@ -1,12 +1,13 @@
 """JWT verification middleware. Validates Bearer token and sets request.state.auth."""
 
-from typing import Callable, Optional
+from typing import Optional
 from uuid import UUID
 
 from jose import JWTError, jwt
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp
 
 from src.common.auth.config import AuthConfig
 from src.models.auth_models import AuthContext
@@ -19,7 +20,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     def __init__(
         self,
-        app,
+        app: ASGIApp,
         config: AuthConfig,
     ) -> None:
         super().__init__(app)
@@ -41,7 +42,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return True
         return False
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         """Validate Bearer JWT; set request.state.auth or return 401."""
         path = request.scope.get("path") or request.url.path
 

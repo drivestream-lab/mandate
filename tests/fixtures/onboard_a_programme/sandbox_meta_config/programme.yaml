@@ -1,0 +1,30 @@
+apiVersion: launchpad/v1
+kind: Programme
+
+# The sandbox programme as Launchpad keeps it, with the parts Mandate reads: repos, the
+# agent filling each role, a decision owner per gate class, the pinned workflow and the
+# starting rung.
+programme: MANDATE-SANDBOX
+programme_slug: mandate-sandbox
+org: drivestream-lab
+meta_repo: mandate-sandbox-meta
+forge:
+  provider: github
+repos:
+  - mandate-sandbox-meta
+  - mandate-sandbox-svc
+roles:
+  - name: coder
+    agent: sandbox-coder
+  - name: design-decider
+    agent: sandbox-design-decider
+decision_owners:
+  intent: kd
+  design: kd
+  release: kd
+  housekeeping: kd
+workflow:
+  contract: sdd-delivery/v2
+  skills_repo: drivestream-lab/prayog-skills
+  version: v0.5.6
+starting_rung: L0

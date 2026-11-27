@@ -1,6 +1,6 @@
 # ADR-014: Inside `mandate`
 
-- Status: accepted
+- Status: accepted; superseded in part (workflows/ location and the upstream-change note) by ADR-028
 - Date: 19 Nov 2026 (amended 21 Nov 2026 where noted)
 - Source: PL-2 in `mandate-meta/prd/INIT-MANDATE-001-engineering.md`
 

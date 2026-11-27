@@ -4,7 +4,8 @@ import contextvars
 import functools
 import uuid
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Optional, TypeVar
+from types import TracebackType
+from typing import Any, Callable, Generator, Optional, TypeVar
 
 from loguru import logger
 
@@ -52,13 +53,18 @@ class LoggingContext:
         self.token = correlation_id_var.set(self.correlation_id)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         if self.token is not None:
             correlation_id_var.reset(self.token)
 
 
 @contextmanager
-def log_scope(**fields: Any) -> Iterator[None]:
+def log_scope(**fields: Any) -> Generator[None, None, None]:
     """Bind searchable log fields for the current scope (Airforge-style contextualize)."""
     bound = {key: str(value) for key, value in fields.items() if value is not None}
     if not bound:

@@ -1,6 +1,7 @@
 """Logging setup module for Parichay."""
 
 import atexit
+import inspect
 import json as _json
 import logging
 import os
@@ -116,10 +117,13 @@ class InterceptHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            level = logger.level(record.levelname).name
+            level: str | int = logger.level(record.levelname).name
         except ValueError:
-            level = record.levelno  # type: ignore[assignment]
-        frame, depth = sys._getframe(6), 6
+            level = record.levelno
+        frame = inspect.currentframe()
+        for _ in range(6):
+            frame = frame.f_back if frame else None
+        depth = 6
         while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1

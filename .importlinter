@@ -1,6 +1,14 @@
 [importlinter]
 root_packages =
     src
+    temporalio
+    httpx
+    sqlalchemy
+    asyncpg
+    redis
+    fastapi
+    starlette
+include_external_packages = True
 
 [importlinter:contract:layer-architecture]
 name = Layered architecture — no cross-layer imports
@@ -10,3 +18,88 @@ layers =
     src.business_services
     src.database.postgres.repository
     src.database.postgres.schema
+
+[importlinter:contract:engine-no-io]
+name = engine imports no IO layer
+type = forbidden
+# Direct and indirect: engine may not reach these through src.models or any other module.
+source_modules =
+    src.engine
+forbidden_modules =
+    src.api
+    src.app
+    src.business_services
+    src.common
+    src.configs
+    src.context_main
+    src.database
+    src.di
+    src.infra_services
+    src.main
+    src.utils
+    src.worker_main
+
+[importlinter:contract:engine-no-io-packages]
+name = engine imports no IO package
+type = forbidden
+# Direct and indirect. temporalio's own internal imports are ignored, because
+# temporalio.workflow (which engine.workflows may use) reaches temporalio.client inside the
+# package; what is checked is engine, or a src module engine imports, importing them.
+source_modules =
+    src.engine
+forbidden_modules =
+    httpx
+    sqlalchemy
+    asyncpg
+    redis
+    fastapi
+    starlette
+    temporalio.client
+    temporalio.worker
+    temporalio.activity
+    temporalio.service
+    temporalio.testing
+    temporalio.bridge
+ignore_imports =
+    temporalio.** -> temporalio.**
+
+[importlinter:contract:workflow-import-boundary]
+name = Only engine.workflows imports temporalio.workflow
+type = forbidden
+source_modules =
+    src
+forbidden_modules =
+    temporalio.workflow
+# Direct imports only: temporalio.worker and temporalio.client import temporalio.workflow
+# internally, and worker_main and the infra client are meant to use them.
+allow_indirect_imports = True
+ignore_imports =
+    src.engine.workflows -> temporalio.workflow
+    src.engine.workflows.** -> temporalio.workflow
+# No workflow exists yet, so the ignore has nothing to match until the first one lands.
+unmatched_ignore_imports_alerting = none
+
+[importlinter:contract:context-gateway-boundary]
+name = context_main imports only models, engine and its own infra client
+type = forbidden
+# Every other top-level piece of src is listed, so context_main may import models and engine
+# only. Its own infra client does not exist yet; the task that adds it narrows the
+# src.infra_services entry to the other clients.
+source_modules =
+    src.context_main
+forbidden_modules =
+    src.api
+    src.app
+    src.common
+    src.configs
+    src.business_services
+    src.database
+    src.di
+    src.exceptions
+    src.infra_services
+    src.logging
+    src.main
+    src.utils
+    src.worker_main
+    fastapi
+    starlette

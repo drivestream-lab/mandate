@@ -1,8 +1,9 @@
 """Shared fixtures for unit tests."""
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,18 +16,15 @@ from src.di.dependency_container import configure_container, reset_container
 
 
 @pytest.fixture(autouse=True)
-def reset_settings() -> None:
+def reset_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear settings singletons and set minimal JWT env for in-process tests."""
     os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-ci-only")
     os.environ.setdefault("JWT_ALGORITHM", "HS256")
-    for name in (
-        "AppSettings",
-        "JWTSettings",
-        "PostgresSettings",
-        "RedisSettings",
-        "TelemetrySettings",
-    ):
-        BaseSettings._instances.pop(name, None)
+    os.environ.setdefault("POSTGRES_USER", "unit_test_user")
+    password_file = tmp_path / "database-password"
+    password_file.write_text("unit-test-password")
+    monkeypatch.setenv("POSTGRES_PASSWORD_FILE", str(password_file))
+    BaseSettings.clear_instances()
 
 
 @pytest.fixture
@@ -37,7 +35,7 @@ def mock_session() -> AsyncMock:
 @pytest.fixture
 def mock_postgres_service(mock_session: AsyncMock) -> MagicMock:
     @asynccontextmanager
-    async def session_ctx() -> AsyncIterator[AsyncMock]:
+    async def session_ctx() -> AsyncGenerator[AsyncMock, None]:
         yield mock_session
 
     postgres = MagicMock()

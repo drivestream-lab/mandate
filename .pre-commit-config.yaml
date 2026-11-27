@@ -1,25 +1,20 @@
+# pre-commit runs make check (Black, Ruff, pyright strict, import-linter); pre-push runs
+# make test. Both call the project's own .venv through the Makefile.
+default_install_hook_types: [pre-commit, pre-push]
 repos:
-  - repo: https://github.com/psf/black
-    rev: 25.1.0
-    hooks:
-      - id: black
-        args: [--line-length, "100"]
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.6
-    hooks:
-      - id: ruff
-        args: [--fix]
   - repo: local
     hooks:
-      - id: pyright
-        name: pyright
-        entry: .venv/bin/pyright
+      - id: make-check
+        name: make check
+        entry: make check
         language: system
-        types: [python]
         pass_filenames: false
-      - id: import-linter
-        name: import-linter
-        entry: .venv/bin/lint-imports
+        always_run: true
+        stages: [pre-commit]
+      - id: make-test
+        name: make test
+        entry: make test
         language: system
-        types: [python]
         pass_filenames: false
+        always_run: true
+        stages: [pre-push]
