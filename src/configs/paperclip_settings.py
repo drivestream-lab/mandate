@@ -8,7 +8,7 @@ from pydantic import Field
 from src.configs.base_settings import BaseSettings
 
 PINNED_PAPERCLIP_COMMIT = "a665ed6a1b990a96f11f73ea7bd73a8228e511e9"
-"""The build commit of the Paperclip baseline Mandate was tested against (image tag mandate-baseline-a665ed6)."""
+"""The Paperclip build Mandate was tested against (image tag mandate-baseline-a665ed6). Code only: no setting or environment value can replace it."""
 
 
 class PaperclipSettings(BaseSettings):
@@ -21,9 +21,4 @@ class PaperclipSettings(BaseSettings):
     agent_id: str = Field(min_length=1, description="Mandate's own agent; every run is woken on it")
     project_id: str | None = Field(default=None, description="Project new issues are filed under")
     token_file: Path = Field(description="Path of the file holding Mandate's agent token")
-    pinned_commit: str = Field(
-        default=PINNED_PAPERCLIP_COMMIT,
-        pattern=r"^[0-9a-f]{40}$",
-        description="The only Paperclip build commit Mandate runs against",
-    )
     request_timeout_seconds: float = Field(default=30.0, gt=0)

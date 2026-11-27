@@ -10,7 +10,13 @@ import pytest
 
 from src.engine.kernel.idempotency_key import derive_idempotency_key
 from src.infra_services.paperclip_service import PaperclipService, WriteOutsideRunError
-from src.models.paperclip_models import NewIssue, NewQuestion, PaperclipRun, QuestionOption
+from src.models.paperclip_models import (
+    NewIssue,
+    NewQuestion,
+    PaperclipRun,
+    QuestionOption,
+    RunStatusType,
+)
 from tests.contract.paperclip.paperclip_stack import MandateIdentity
 
 pytestmark = pytest.mark.req("REQ-40")
@@ -93,7 +99,7 @@ async def test_a_write_outside_a_run_mandate_opened_is_refused_before_it_is_sent
 ) -> None:
     work_item = _work_item()
     run = await paperclip.open_run(work_item, "real")
-    foreign = PaperclipRun(id=str(uuid.uuid4()), agent_id=run.agent_id, status="queued")
+    foreign = PaperclipRun(id=str(uuid.uuid4()), agent_id=run.agent_id, status=RunStatusType.QUEUED)
 
     with pytest.raises(WriteOutsideRunError):
         await paperclip.create_issue(foreign, work_item, "real", NewIssue(title="No run"))

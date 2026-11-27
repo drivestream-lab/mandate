@@ -15,12 +15,15 @@ import uuid
 import httpx
 from pydantic import BaseModel, TypeAdapter
 
-from src.configs.paperclip_settings import PaperclipSettings
+from src.configs.paperclip_settings import PINNED_PAPERCLIP_COMMIT, PaperclipSettings
 from src.engine.kernel.idempotency_key import derive_idempotency_key
 from src.infra_services.base_infra_service import BaseInfraService
 from src.logging import get_logger
 from src.models.kernel_models import IdempotencyKey
 from src.models.paperclip_models import (
+    PaperclipRequest,
+    CommentRequest,
+    IssueRequest,
     NewIssue,
     NewQuestion,
     PaperclipComment,
@@ -28,6 +31,10 @@ from src.models.paperclip_models import (
     PaperclipIssue,
     PaperclipQuestion,
     PaperclipRun,
+    QuestionPayload,
+    QuestionRequest,
+    QuestionSpec,
+    WakeupRequest,
 )
 
 logger = get_logger()
@@ -74,6 +81,7 @@ def _comment_request_id(key: IdempotencyKey) -> str:
     return str(uuid.UUID(hex=key.value[:32], version=4))
 
 
+_JSON = {"Content-Type": "application/json"}
 _COMMENTS = TypeAdapter(list[PaperclipComment])
 _QUESTIONS = TypeAdapter(list[PaperclipQuestion])
 
@@ -81,8 +89,15 @@ _QUESTIONS = TypeAdapter(list[PaperclipQuestion])
 class PaperclipService(BaseInfraService):
     """Talks to Paperclip as Mandate's own agent, only inside its own runs."""
 
-    def __init__(self, settings: PaperclipSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: PaperclipSettings | None = None,
+        *,
+        pinned_commit: str = PINNED_PAPERCLIP_COMMIT,
+    ) -> None:
+        """`pinned_commit` is for tests that need another pin; it is never read from configuration."""
         self._settings = settings if settings is not None else PaperclipSettings.get_instance()
+        self._pinned_commit = pinned_commit
         self._client: httpx.AsyncClient | None = None
         self._opened_runs: set[str] = set()
 
@@ -128,15 +143,11 @@ class PaperclipService(BaseInfraService):
         await self._verify_release(client)
         key = derive_idempotency_key(work_item_id, f"{step}:run")
         path = f"/api/agents/{self._settings.agent_id}/wakeup"
+        request = WakeupRequest(reason=f"Mandate step {step}", idempotency_key=key.value)
         response = await client.post(
             path,
-            json={
-                "source": "on_demand",
-                "triggerDetail": "manual",
-                "reason": f"Mandate step {step}",
-                "idempotencyKey": key.value,
-            },
-            headers={"Idempotency-Key": key.value},
+            content=request.to_json(),
+            headers={"Idempotency-Key": key.value, **_JSON},
         )
         self._raise_for_status(response, path)
         run = self._parse(PaperclipRun, response, path)
@@ -150,13 +161,12 @@ class PaperclipService(BaseInfraService):
     ) -> PaperclipIssue:
         """File an issue in Mandate's company (and project, when set), unassigned."""
         key = derive_idempotency_key(work_item_id, f"{step}:issue")
-        body: dict[str, object] = {
-            "title": issue.title,
-            "description": issue.description,
-            "idempotencyKey": key.value,
-        }
-        if self._settings.project_id is not None:
-            body["projectId"] = self._settings.project_id
+        body = IssueRequest(
+            title=issue.title,
+            description=issue.description,
+            idempotency_key=key.value,
+            project_id=self._settings.project_id,
+        )
         path = f"/api/companies/{self._settings.company_id}/issues"
         response = await self._write(run, path, key, body)
         return self._parse(PaperclipIssue, response, path)
@@ -167,9 +177,8 @@ class PaperclipService(BaseInfraService):
         """Add a comment to an issue."""
         key = derive_idempotency_key(work_item_id, f"{step}:comment")
         path = f"/api/issues/{issue_id}/comments"
-        response = await self._write(
-            run, path, key, {"body": text, "clientRequestId": _comment_request_id(key)}
-        )
+        body = CommentRequest(body=text, client_request_id=_comment_request_id(key))
+        response = await self._write(run, path, key, body)
         return self._parse(PaperclipComment, response, path)
 
     async def open_question(
@@ -177,27 +186,18 @@ class PaperclipService(BaseInfraService):
     ) -> PaperclipQuestion:
         """Open a single-choice question on an issue that only a person can answer."""
         key = derive_idempotency_key(work_item_id, f"{step}:question")
-        body: dict[str, object] = {
-            "kind": "ask_user_questions",
-            "continuationPolicy": "none",
-            "resolverPolicy": "human_only",
-            "idempotencyKey": key.value,
-            "payload": {
-                "version": 1,
-                "title": question.title,
-                "questions": [
-                    {
-                        "id": question.question_id,
-                        "prompt": question.prompt,
-                        "selectionMode": "single",
-                        "required": True,
-                        "options": [o.model_dump() for o in question.options],
-                    }
-                ],
-            },
-        }
-        if question.addressee_user_id is not None:
-            body["addresseeUserId"] = question.addressee_user_id
+        body = QuestionRequest(
+            idempotency_key=key.value,
+            payload=QuestionPayload(
+                title=question.title,
+                questions=(
+                    QuestionSpec(
+                        id=question.question_id, prompt=question.prompt, options=question.options
+                    ),
+                ),
+            ),
+            addressee_user_id=question.addressee_user_id,
+        )
         path = f"/api/issues/{issue_id}/interactions"
         response = await self._write(run, path, key, body)
         return self._parse(PaperclipQuestion, response, path)
@@ -228,17 +228,17 @@ class PaperclipService(BaseInfraService):
             raise UnrecognisedReleaseError(
                 f"Paperclip's release could not be read: {type(error).__name__}"
             ) from error
-        check_release(health, self._settings.pinned_commit)
+        check_release(health, self._pinned_commit)
 
     async def _write(
-        self, run: PaperclipRun, path: str, key: IdempotencyKey, body: dict[str, object]
+        self, run: PaperclipRun, path: str, key: IdempotencyKey, body: PaperclipRequest
     ) -> httpx.Response:
         if run.id not in self._opened_runs:
             raise WriteOutsideRunError("writes are allowed only inside a run this client opened")
         response = await self._ready().post(
             path,
-            json=body,
-            headers={"X-Paperclip-Run-Id": run.id, "Idempotency-Key": key.value},
+            content=body.to_json(),
+            headers={"X-Paperclip-Run-Id": run.id, "Idempotency-Key": key.value, **_JSON},
         )
         self._raise_for_status(response, path)
         return response

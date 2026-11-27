@@ -27,7 +27,7 @@ async def test_a_different_pinned_release_stops_the_client_before_any_work(
     mandate_identity: MandateIdentity,
 ) -> None:
     other_release = "0" * 40
-    service = PaperclipService(settings_for(mandate_identity, pinned_commit=other_release))
+    service = PaperclipService(settings_for(mandate_identity), pinned_commit=other_release)
 
     with pytest.raises(UnrecognisedReleaseError, match="not the pinned release"):
         await service.initialize()
@@ -38,7 +38,7 @@ async def test_a_different_pinned_release_stops_the_client_before_any_work(
 async def test_no_run_can_be_opened_after_the_release_was_refused(
     mandate_identity: MandateIdentity,
 ) -> None:
-    service = PaperclipService(settings_for(mandate_identity, pinned_commit="1" * 40))
+    service = PaperclipService(settings_for(mandate_identity), pinned_commit="1" * 40)
     with pytest.raises(UnrecognisedReleaseError):
         await service.initialize()
 
