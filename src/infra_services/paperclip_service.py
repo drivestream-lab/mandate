@@ -42,7 +42,8 @@ from src.models.paperclip_models import (
     ProjectRequest,
     QuestionRequest,
     QuestionSpec,
-    SkillPolicy,
+    SkillDecision,
+    SkillEvaluationRequest,
     WakeupRequest,
 )
 
@@ -247,9 +248,13 @@ class PaperclipService(BaseInfraService):
         path = f"/api/agents/{agent_id}/interaction-permissions"
         return self._parse(InteractionPermissions, await self._read(path), path)
 
-    async def get_skill_policy(self) -> SkillPolicy:
-        path = f"/api/companies/{self._settings.company_id}/skill-policy"
-        return self._parse(SkillPolicy, await self._read(path), path)
+    async def evaluate_skill_action(self, action: str) -> SkillDecision:
+        """Ask Paperclip whether Mandate's agent may take this skill action; it decides, not Mandate."""
+        path = f"/api/companies/{self._settings.company_id}/skill-policy/evaluate"
+        body = SkillEvaluationRequest(action=action)
+        response = await self._ready().post(path, content=body.to_json(), headers=_JSON)
+        self._raise_for_status(response, path)
+        return self._parse(SkillDecision, response, path)
 
     async def get_issue(self, issue_id: str) -> PaperclipIssue:
         path = f"/api/issues/{issue_id}"

@@ -180,7 +180,6 @@ class PaperclipAgent(_PaperclipRecord):
     id: str
     name: str
     status: str
-    role: str
     lifecycle_state: str
     permissions: AgentPermissions = AgentPermissions()
 
@@ -198,31 +197,12 @@ class InteractionPermissions(_PaperclipRecord):
     effective: EffectiveInteractions
 
 
-class SkillPolicySubject(_PaperclipRecord):
-    """Whom a skill-policy rule applies to."""
+class SkillDecision(_PaperclipRecord):
+    """Paperclip's own answer on whether the calling agent may take a skill action."""
 
-    type: str
-    agent_ids: tuple[str, ...] = ()
-    roles: tuple[str, ...] = ()
-
-
-class SkillPolicyRule(_PaperclipRecord):
-    """One rule of the company skill policy."""
-
-    id: str
-    priority: int = 0
-    effect: str
-    subject: SkillPolicySubject
-    actions: tuple[str, ...] = ()
-    resources: dict[str, object] | None = None
-
-
-class SkillPolicy(_PaperclipRecord):
-    """The company skill policy."""
-
-    default_effect: str
-    materialized: bool = True
-    rules: tuple[SkillPolicyRule, ...] = ()
+    allowed: bool
+    action: str
+    reason: str
 
 
 class PaperclipProject(_PaperclipRecord):
@@ -342,3 +322,9 @@ class ProjectRequest(PaperclipRequest):
 
     name: str
     description: str
+
+
+class SkillEvaluationRequest(PaperclipRequest):
+    """Ask Paperclip whether the calling agent may take a skill action."""
+
+    action: str

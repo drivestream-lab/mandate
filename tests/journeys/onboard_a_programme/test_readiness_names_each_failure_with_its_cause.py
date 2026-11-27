@@ -1,5 +1,8 @@
 """Journey: readiness shows each failure with its cause, and nothing starts while any fails."""
 
+from pathlib import Path
+
+import httpx
 import pytest
 
 from src.business_services.programmes.programme_from_meta_service import ProgrammeFromMetaService
@@ -113,5 +116,64 @@ async def test_an_agent_that_can_create_agents_or_assign_tasks_fails_readiness(
 
     assert {f.check for f in report.failures} == {ReadinessCheckType.MANDATE_AGENT_LIMITS}
     causes = " | ".join(f.cause for f in report.failures)
-    for expected in ("create agents", "assign tasks to agents", "skill policy"):
+    for expected in ("create agents", "assign tasks to agents"):
         assert expected in causes
+
+
+@pytest.mark.req("REQ-40")
+async def test_a_default_deny_policy_does_not_stop_an_agent_that_holds_a_skill_grant(
+    programme: Programme,
+    mandate_identity: MandateIdentity,
+    repository_access: GitHubRepositoryAccess,
+    tmp_path: Path,
+) -> None:
+    """A new agent holds a direct skills:create grant; under default-deny Paperclip still allows it."""
+    with httpx.Client(
+        base_url=mandate_identity.base_url,
+        headers={"Origin": mandate_identity.base_url},
+        timeout=60,
+    ) as board:
+        board.post(
+            "/api/auth/sign-in/email",
+            json={
+                "email": mandate_identity.board_email,
+                "password": mandate_identity.board_password,
+            },
+        ).raise_for_status()
+        company = board.post("/api/companies", json={"name": "Default deny"}).raise_for_status()
+        company_id = str(company.json()["id"])
+        board.put(
+            f"/api/companies/{company_id}/skill-policy",
+            json={"schemaVersion": 1, "defaultEffect": "deny", "expectedRevision": 0, "rules": []},
+        ).raise_for_status()
+        agent = board.post(
+            f"/api/companies/{company_id}/agents",
+            json={
+                "name": "Granted",
+                "role": "engineer",
+                "title": "Granted",
+                "adapterType": "process",
+                "adapterConfig": {"command": "true"},
+            },
+        ).raise_for_status()
+        agent_id = str(agent.json()["id"])
+        key = board.post(
+            f"/api/agents/{agent_id}/keys", json={"name": "granted"}
+        ).raise_for_status()
+    token_file = tmp_path / "granted-token"
+    token_file.write_text(str(key.json()["token"]), encoding="utf-8")
+    service = PaperclipService(
+        settings_for(
+            mandate_identity, company_id=company_id, agent_id=agent_id, token_file=token_file
+        )
+    )
+    await service.initialize()
+    try:
+        report = await ProgrammeReadinessService(service, repository_access).check(programme)
+    finally:
+        await service.close()
+
+    causes = [
+        f.cause for f in report.failures if f.check is ReadinessCheckType.MANDATE_AGENT_LIMITS
+    ]
+    assert any("Paperclip allows it skills.create (legacy_compatibility)" in c for c in causes)

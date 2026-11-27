@@ -4,8 +4,8 @@ Four checks: every role has a usable agent; GitHub access works for every repo; 
 workflow loads (the meta repo's harness pin at the programme's commit names a skills repo and
 release, and that release's workflow.yaml is read and parsed); and Mandate's own Paperclip agent
 cannot create agents or skills or assign tasks. The agent's permission flags alone do not deny
-the last two on the pinned Paperclip, so the interaction permissions and a company skill-policy
-deny rule are read as well. Every check runs and each failure carries its cause.
+the last two on the pinned Paperclip, so the interaction permissions are read and Paperclip itself is asked whether the agent may
+take each skill action (its answer covers the skill-policy rules and the grants new agents get). Every check runs and each failure carries its cause.
 """
 
 import yaml
@@ -18,7 +18,7 @@ from src.business_services.programmes.programme_from_meta_service import (
 )
 from src.exceptions.app_exceptions import BaseAppException
 from src.infra_services.paperclip_service import PaperclipError, PaperclipService
-from src.models.paperclip_models import PaperclipAgent, SkillPolicy, SkillPolicySubject
+from src.models.paperclip_models import PaperclipAgent
 from src.models.programme_models import (
     Programme,
     ReadinessCheckType,
@@ -163,7 +163,6 @@ class ProgrammeReadinessService(BaseBusinessService):
         try:
             agent = await self._paperclip.get_agent(agent_id)
             interactions = (await self._paperclip.get_interaction_permissions(agent_id)).effective
-            policy = await self._paperclip.get_skill_policy()
         except PaperclipError as error:
             return [_failure(subject, agent_id, f"cannot read the agent's limits: {error}")]
         causes: list[str] = []
@@ -174,8 +173,13 @@ class ProgrammeReadinessService(BaseBusinessService):
         if interactions.can_configure_other_agents:
             causes.append("it may configure other agents")
         for action in sorted(_SKILL_ACTIONS):
-            if not _skill_action_denied(policy, agent, action):
-                causes.append(f"the company skill policy does not deny it {action}")
+            try:
+                decision = await self._paperclip.evaluate_skill_action(action)
+            except PaperclipError as error:
+                causes.append(f"Paperclip could not say whether it may {action}: {error}")
+                continue
+            if decision.allowed:
+                causes.append(f"Paperclip allows it {action} ({decision.reason})")
         return [_failure(subject, agent.name, cause) for cause in causes]
 
 
@@ -183,35 +187,6 @@ def agent_unusable_cause(agent: PaperclipAgent) -> str | None:
     if agent.lifecycle_state != "ready" or agent.status not in _USABLE_STATUSES:
         return f"agent {agent.name} is not usable: status {agent.status}, state {agent.lifecycle_state}"
     return None
-
-
-def _skill_action_denied(policy: SkillPolicy, agent: PaperclipAgent, action: str) -> bool:
-    """Decide the way the pinned Paperclip does: the first matching rule by priority, then id.
-
-    A rule that names resources covers only some skills: a deny of that kind does not count
-    as a denial, and an allow of that kind counts against it. With no policy stored, or no
-    matching rule, the default effect decides.
-    """
-    if not policy.materialized:
-        return False
-    for rule in sorted(policy.rules, key=lambda r: (r.priority, r.id)):
-        if action not in rule.actions or not _subject_matches(rule.subject, agent):
-            continue
-        if rule.resources:
-            if rule.effect == "allow":
-                return False
-            continue
-        return rule.effect == "deny"
-    return policy.default_effect == "deny"
-
-
-def _subject_matches(subject: SkillPolicySubject, agent: PaperclipAgent) -> bool:
-    if subject.type == "all_agents":
-        return True
-    if subject.type == "agents":
-        return agent.id in subject.agent_ids
-    role = agent.role.strip().lower()
-    return bool(role) and any(r.strip().lower() == role for r in subject.roles)
 
 
 def _failure(check: ReadinessCheckType, subject: str, cause: str) -> ReadinessFailure:
