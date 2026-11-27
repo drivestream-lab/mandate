@@ -8,7 +8,7 @@ tests/
                Run: make test
   verify/      Live verify scripts (run by `make verify` against a deployed stack).
   journeys/    End-to-end journeys on the local ephemeral stack.
-               Run: make journeys   (or: make journeys -- tests/journeys/<file>.py)
+               Run: make journeys   (or: make journeys ARGS="tests/journeys/<file>.py -x")
   _helpers/    Shared fixtures and helpers (e.g. verify preflight).
 ```
 

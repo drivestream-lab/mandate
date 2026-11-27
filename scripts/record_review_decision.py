@@ -1,11 +1,11 @@
-"""Record a human review decision for a merged pull request (REQ-120).
+"""Record a human review decision for a merged pull request.
 
 Run by hand from the repo root. Appends one JSON line in the ledger entry format (actor, choice, target commit,
 version stamp) to the local file given as --output. It never writes into mandate-meta: KD
 commits the output to mandate-meta/ledger-import/ separately.
 
     python -m scripts.record_review_decision --output /tmp/decisions.jsonl \
-        --actor nikd10x --choice approved --target-commit <40-hex sha> \
+        --actor <reviewer-login> --choice approved --target-commit <40-hex sha> \
         --pull-request drivestream-lab/mandate#12 --mandate-release 0.1.0 --rules-version v0.5.12
 """
 
@@ -42,7 +42,9 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--actor", required=True)
-    parser.add_argument("--choice", type=ReviewChoiceType, choices=list(ReviewChoiceType), required=True)
+    parser.add_argument(
+        "--choice", type=ReviewChoiceType, choices=list(ReviewChoiceType), required=True
+    )
     parser.add_argument("--target-commit", required=True)
     parser.add_argument("--pull-request", required=True)
     parser.add_argument("--mandate-release", required=True)

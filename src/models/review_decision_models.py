@@ -1,4 +1,4 @@
-"""A human review decision, in the shape the ledger imports (REQ-120)."""
+"""A human review decision, in the shape the ledger imports."""
 
 from enum import StrEnum
 

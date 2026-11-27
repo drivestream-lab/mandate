@@ -1,19 +1,20 @@
 """Run-wide pytest setup: fail the run when a built requirement has no test.
 
 A requirement counts as built when its row in docs/specification/as-built/requirements.md is
-marked implemented, unit-tested or live-verified. Each needs at least one test carrying
-@pytest.mark.req("REQ-nn"). The check runs only when asked for with --require-req-coverage,
-which `make test` passes (the suite those tests live in). Other runs, such as `make journeys`,
-do not collect the unit tests and so never apply it.
+marked implemented, unit-tested or live-verified. Each needs at least one test, anywhere under
+tests/, carrying @pytest.mark.req("REQ-nn"); the markers are read statically, so journeys count
+without being run. The check runs only with --require-req-coverage, which `make test` passes.
+A missing table, or a row whose status is blank or unknown, fails the run too.
 """
 
 from pathlib import Path
 
 import pytest
 
-from tests._helpers.requirement_coverage import requirements_without_test
+from tests._helpers.requirement_coverage import requirements_without_test, requirements_with_marker
 
 _AS_BUILT = Path("docs/specification/as-built/requirements.md")
+_TESTS_ROOT = Path("tests")
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -27,16 +28,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_collection_finish(session: pytest.Session) -> None:
     config = session.config
-    table = config.rootpath / _AS_BUILT
-    if not config.getoption("require_req_coverage") or not table.is_file():
+    if not config.getoption("require_req_coverage"):
         return
-    tested = {
-        str(marker.args[0])
-        for item in session.items
-        for marker in item.iter_markers(name="req")
-        if marker.args
-    }
-    missing = requirements_without_test(table.read_text(encoding="utf-8"), tested)
+    table = config.rootpath / _AS_BUILT
+    if not table.is_file():
+        raise pytest.UsageError(f"requirement coverage check: {_AS_BUILT} is missing")
+    try:
+        missing = requirements_without_test(
+            table.read_text(encoding="utf-8"),
+            requirements_with_marker(config.rootpath / _TESTS_ROOT),
+        )
+    except ValueError as error:
+        raise pytest.UsageError(f"requirement coverage check: {error}") from error
     if missing:
         raise pytest.UsageError(
             "built requirements with no test carrying @pytest.mark.req: " + ", ".join(missing)

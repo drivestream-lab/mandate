@@ -28,16 +28,11 @@ layers:
 test:
 	.venv/bin/pytest tests/unit/ -v --require-req-coverage
 
-# make journeys: the end-to-end journeys against the local ephemeral stack. Extra paths and
-# pytest options pass through after a double dash: make journeys -- tests/journeys/foo.py -x
-# With none, every journey under tests/journeys runs. (W0-06 builds the stack they run on.)
-ifneq ($(filter journeys,$(MAKECMDGOALS)),)
-JOURNEY_ARGS := $(filter-out journeys,$(MAKECMDGOALS))
-$(JOURNEY_ARGS): ; @:
-endif
-
+# make journeys: the end-to-end journeys against the local ephemeral stack. Paths and pytest
+# options go in ARGS: make journeys ARGS="tests/journeys/foo.py -x". With none, every journey
+# under tests/journeys runs. (A later task builds the stack they run on.)
 journeys:
-	.venv/bin/pytest $(if $(JOURNEY_ARGS),$(JOURNEY_ARGS),tests/journeys) -v
+	.venv/bin/pytest $(if $(ARGS),$(ARGS),tests/journeys) -v
 
 run:
 	.venv/bin/python -m src.main

@@ -71,7 +71,6 @@ venvPath = "."
 venv = ".venv"
 reportMissingImports = true
 reportMissingModuleSource = false
-reportMissingTypeStubs = false
 
 [[tool.pyright.executionEnvironments]]
 root = "."

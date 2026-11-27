@@ -2,6 +2,12 @@
 root_packages =
     src
     temporalio
+    httpx
+    sqlalchemy
+    asyncpg
+    redis
+    fastapi
+    starlette
 include_external_packages = True
 
 [importlinter:contract:layer-architecture]
@@ -26,6 +32,19 @@ forbidden_modules =
     src.di
     src.configs
     src.common
+    src.utils
+    httpx
+    sqlalchemy
+    asyncpg
+    redis
+    fastapi
+    starlette
+    temporalio.client
+    temporalio.worker
+    temporalio.activity
+# Direct imports only: temporalio.workflow (allowed here) itself reaches other temporalio
+# modules, which is not the engine importing them.
+allow_indirect_imports = True
 
 [importlinter:contract:workflow-import-boundary]
 name = Only engine.workflows imports temporalio.workflow
@@ -34,6 +53,9 @@ source_modules =
     src
 forbidden_modules =
     temporalio.workflow
+# Direct imports only: temporalio.worker and temporalio.client import temporalio.workflow
+# internally, and worker_main and the infra client are meant to use them.
+allow_indirect_imports = True
 ignore_imports =
     src.engine.workflows.** -> temporalio.workflow
 # No workflow exists yet, so the ignore has nothing to match until the first one lands.
@@ -61,3 +83,5 @@ forbidden_modules =
     src.main
     src.utils
     src.worker_main
+    fastapi
+    starlette

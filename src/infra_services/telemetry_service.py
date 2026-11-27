@@ -1,5 +1,8 @@
 """OpenTelemetry infrastructure service for metrics and traces."""
 
+# The two OpenTelemetry instrumentation packages below ship no type stubs.
+# pyright: reportMissingTypeStubs=false
+
 from typing import Optional
 
 from fastapi import FastAPI
