@@ -8,7 +8,7 @@ from pytest import TempPathFactory
 
 from src.configs.paperclip_settings import PaperclipSettings
 from src.infra_services.paperclip_service import PaperclipService
-from tests.contract.paperclip.paperclip_stack import MandateIdentity, provision_mandate_identity
+from tests.contract.paperclip.paperclip_stack import MandateIdentity, provision_once
 from tests.journeys.journey_support import StackAddresses
 
 
@@ -18,7 +18,7 @@ def mandate_identity(
 ) -> MandateIdentity:
     """A company, a project and Mandate's restricted agent in this run's Paperclip."""
     token_file = tmp_path_factory.mktemp("paperclip-token") / "mandate-token"
-    return provision_mandate_identity(journey_stack.paperclip_url, token_file)
+    return provision_once(journey_stack.paperclip_url, token_file)
 
 
 def settings_for(identity: MandateIdentity, **overrides: str | Path) -> PaperclipSettings:
