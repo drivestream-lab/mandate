@@ -15,6 +15,16 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ds_mandate_db
+      # Throwaway deploy-stack passwords for the two roles the lab also has; the init script
+      # below creates them, the migration only grants to them.
+      MANDATE_DB_OWNER_PASSWORD: postgres
+      MANDATE_DB_APP_PASSWORD: postgres
+    volumes:
+      - ./postgres/10-mandate-roles.sh:/docker-entrypoint-initdb.d/10-mandate-roles.sh:ro
+    # Published on a free loopback port so a journey can connect as each role:
+    # docker compose -p <project> port postgres 5432
+    ports:
+      - "127.0.0.1::5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d ds_mandate_db"]
       interval: 3s

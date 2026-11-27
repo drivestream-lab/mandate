@@ -13,7 +13,7 @@ Requirement text lives in `mandate-meta/prd/INIT-MANDATE-001.md`; this table tra
 | REQ-42 | W1 | not started | |
 | REQ-43 | W1 | not started | |
 | REQ-54 | W1 | not started | |
-| REQ-55 | W1 | not started | |
+| REQ-55 | W1 | implemented | Database protection only (TASK-W0-03): schema per capability, mandate_app limited to INSERT and SELECT on ledger.entries, append-only trigger; proved by tests/journeys/database_roles against the deploy stack. The correction entry that references the original comes with the ledger writer |
 | REQ-60 | W1 | not started | |
 | REQ-61 | W1 | not started | |
 | REQ-62 | W1 | not started | |

@@ -10,6 +10,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.configs.postgres_settings import PostgresSettings
 from src.database.postgres.schema.base_postgres_schema import postgres_metadata
+from src.database.postgres.schema.gates import gate_schema  # noqa: F401
+from src.database.postgres.schema.ledger import ledger_entry_schema  # noqa: F401
+from src.database.postgres.schema.ledger import rewrite_permit_schema  # noqa: F401
+from src.database.postgres.schema.outbox import outbox_message_schema  # noqa: F401
+from src.database.postgres.schema.runner import work_item_schema  # noqa: F401
 
 target_metadata = postgres_metadata
 
@@ -30,6 +35,7 @@ def run_migrations_offline() -> None:
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
+        include_schemas=True,
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
@@ -39,7 +45,9 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     connectable = create_engine(get_url(), poolclass=pool.NullPool)
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection, target_metadata=target_metadata, include_schemas=True
+        )
         with context.begin_transaction():
             context.run_migrations()
 
