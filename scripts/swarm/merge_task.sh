@@ -3,10 +3,13 @@
 #
 #   scripts/swarm/merge_task.sh drivestream-lab/mandate 42
 #
-# Merges a task PR into develop, or the wave PR from develop into main. Refuses unless:
-#   - the PR is open, and its base is develop, or main with head develop;
+# Merges a task PR into develop. Refuses unless:
+#   - the PR is open, its base is develop, and its head branch is in this repo;
 #   - the latest mandate/build-verified status on the head is success, posted by
 #     mandate-runner[bot].
+# Nothing merges into main: KD decided on 27 Nov 2026 that main is left alone for now.
+# When that changes, a main merge must also refuse while a develop-red issue is open,
+# because the runner freezes only PRs into develop.
 # The runner encodes every review rule (challengers, protected paths, the wave signoff,
 # the develop-red freeze and its fix exception), so a green status from it is the only
 # thing that lets a merge through. The merge API call pins sha to that head, so a push
@@ -18,11 +21,16 @@ repo="${1:?usage: merge_task.sh OWNER/REPO PR}"
 pr="${2:?usage: merge_task.sh OWNER/REPO PR}"
 gh_b() { "$here/as_role.sh" builder gh "$@"; }
 
-read -r state base head_ref head < <(gh_b api "repos/$repo/pulls/$pr" -q '"\(.state) \(.base.ref) \(.head.ref) \(.head.sha)"')
+read -r state base head_ref head_repo head < <(gh_b api "repos/$repo/pulls/$pr" \
+  -q '"\(.state) \(.base.ref) \(.head.ref) \(.head.repo.full_name) \(.head.sha)"')
 
 [[ "$state" == "open" ]] || { echo "refused: PR $pr is $state" >&2; exit 1; }
-if [[ "$base" != "develop" ]] && ! [[ "$base" == "main" && "$head_ref" == "develop" ]]; then
-  echo "refused: $head_ref into $base; the builder merges task PRs into develop and develop into main only" >&2
+if [[ "$base" != "develop" ]]; then
+  echo "refused: base is $base; the builder merges into develop only (nothing into main, KD)" >&2
+  exit 1
+fi
+if [[ "$head_repo" != "$repo" ]]; then
+  echo "refused: head is from $head_repo, not $repo" >&2
   exit 1
 fi
 

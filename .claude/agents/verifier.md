@@ -18,9 +18,10 @@ The lead gives you the repo, the PR number, the head sha and the task id.
    ```bash
    git fetch origin pull/<n>/head
    git worktree add --detach ../.worktrees/verify-<n> FETCH_HEAD && cd ../.worktrees/verify-<n>
-   make setup
-   make deploy DEPLOY_PROJECT=mandate-pr-<n> MANDATE_DEPLOY_PORT=<8100+n>
-   MANDATE_SERVICE_URL=http://localhost:<8100+n> make verify DEPLOY_PROJECT=mandate-pr-<n>
+   # The PR's code runs here: never with KD's token in the environment.
+   env -u GITHUB_TOKEN -u GH_TOKEN make setup
+   env -u GITHUB_TOKEN -u GH_TOKEN make deploy DEPLOY_PROJECT=mandate-pr-<n> MANDATE_DEPLOY_PORT=<8100+n>
+   env -u GITHUB_TOKEN -u GH_TOKEN MANDATE_SERVICE_URL=http://localhost:<8100+n> make verify DEPLOY_PROJECT=mandate-pr-<n>
    ```
    `make verify` is the black-box test: it may only talk to the deployed service.
 3. Look for evidence behind each exit criterion, read-only:

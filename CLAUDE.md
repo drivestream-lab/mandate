@@ -64,17 +64,17 @@ The lead is a Claude Code session working the implementation plan wave by wave, 
 | Who | Acts as | How |
 | --- | --- | --- |
 | Lead, builders, integrator | `mandate-builder` (App 5860819) | `scripts/swarm/as_role.sh builder git ...` and `... builder gh ...` |
-| Challengers | `mandate-challenger` (App 5860827) | `scripts/swarm/as_role.sh challenger gh ...` |
+| Challengers, and the verifier's evidence comments and wave signoff | `mandate-challenger` (App 5860827) | `scripts/swarm/as_role.sh challenger gh ...` |
 | Runner | `mandate-runner` (App 5860839) | Never used by the swarm. Its folder under `~/.mandate/secrets/build/` is never read or mounted |
 | People | `nikd10x`, `0xbeefdead` | Never used by the swarm: no commit, review, approval, label, merge or attestation. No rule counts a person's review |
 
-`GITHUB_TOKEN` on the lab machine is KD's own token. Never run plain `gh` or `git push`; `as_role.sh` removes it and mints the role's App token (`scripts/swarm/app_token.sh`, git credential helper `scripts/swarm/git-credential-mandate-app`). Each role reads only its own App's folder.
+`GITHUB_TOKEN` on the lab machine is KD's own token. Start the lead session with it removed (`env -u GITHUB_TOKEN -u GH_TOKEN claude`), so no subagent and no code a PR runs can act as KD. Never run plain `gh` or `git push`; `as_role.sh` removes it and mints the role's App token (`scripts/swarm/app_token.sh`, git credential helper `scripts/swarm/git-credential-mandate-app`). Each role reads only its own App's folder.
 
 ### The steps
 
 1. **Rebuild state** from the repos and GitHub, never from memory: the WorkManifest (`mandate-meta` plan section 9), `docs/specification/as-built/requirements.md`, open and merged PRs on `mandate` and `mandate-control-tower` with their statuses and reviews, open `develop-red` issues, and the pinned build-log issue.
 2. **Red develop first.** While a runner-opened `develop-red` issue is open, only its fix merges. Start the `verifier` on the issue, then a builder on the fix (`Fixes #N` in the body). The fix needs `Challenger: first` and a separate `Challenger: second` on its head; then it merges like any task.
-3. **Merge what is ready.** For each open PR whose `mandate/build-verified` is green on the current head, run `scripts/swarm/merge_task.sh <repo> <pr>`. It refuses unless the base is `develop` (or `main` with head `develop`) and the runner's status is green on that head, and it merges with the sha pinned. The runner encodes every review rule, so never merge on any other signal, and never post a status.
+3. **Merge what is ready.** For each open PR into `develop` whose `mandate/build-verified` is green on the current head, run `scripts/swarm/merge_task.sh <repo> <pr>`. It refuses unless the base is `develop`, the head is in the same repo and the runner's status is green on that head, and it merges with the sha pinned. Nothing merges into `main` until KD says so. The runner encodes every review rule, so never merge on any other signal, and never post a status.
 4. **Evidence, then reviews.** For each PR head without them:
    - start the `verifier` in evidence mode: it deploys the head in its worktree (`make deploy` with its own `DEPLOY_PROJECT` and port), runs `make verify` as a black-box test, checks the deployed app's tables and logs for what the task claims, and posts the evidence as a PR comment (as `mandate-challenger`);
    - then start `challenger` (spec, then diff, then the verifier's evidence);
@@ -86,7 +86,7 @@ The lead is a Claude Code session working the implementation plan wave by wave, 
 7. **Close the wave.** When every task of the wave has merged and develop is green, open the wave PR from `develop` into `main` as `mandate-builder`, with a brief: tasks merged, journeys run, findings, spend. Then:
    - the `verifier` in wave mode checks the lab deploy of the develop head (the runner's develop run, `lab-mandate`'s tables and logs) against every exit criterion of the wave, and posts the evidence;
    - when it holds, `mandate-builder` adds `wave-accepted` and marks the PR ready, and the verifier posts the signoff as `mandate-challenger`: an Approve whose body has `Signoff: wave`, `Initiative: INIT-MANDATE-001` and `Head: <full head sha>`, and no challenger marker;
-   - when the runner is green on that head, `merge_task.sh` merges it. The next wave starts only once `main` has moved.
+   - merging into `main` waits for KD: nothing merges into `main` until KD says so (27 Nov 2026). When it does, the merge must also refuse while a `develop-red` issue is open, because the runner freezes only PRs into `develop`.
 8. **Record** each merge, failure and stop as one comment on the build-log issue (below).
 
 ### Stop and wait for KD, only when

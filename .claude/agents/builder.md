@@ -37,8 +37,9 @@ Never branch from, or depend on, unmerged work. If your task needs something tha
 
 Run, in the worktree, and keep the output:
 ```bash
-make setup && make check && make test
+env -u GITHUB_TOKEN -u GH_TOKEN bash -c 'make setup && make check && make test'
 ```
+(KD's `GITHUB_TOKEN` must never reach code under test.)
 plus the task's verify command for every journey it touches. All must pass before you push. If a check fails for a reason outside your task, stop and report it.
 
 ## Commit, push, open the PR (as mandate-builder only)
