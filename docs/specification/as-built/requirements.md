@@ -12,8 +12,8 @@ Requirement text lives in `mandate-meta/prd/INIT-MANDATE-001.md`; this table tra
 | REQ-40 | W1 | not started | |
 | REQ-42 | W1 | not started | |
 | REQ-43 | W1 | not started | |
-| REQ-54 | W1 | not started | |
-| REQ-55 | W1 | implemented | Database protection only (TASK-W0-03): schema per capability, mandate_app limited to INSERT and SELECT on ledger.entries, append-only trigger; proved by tests/journeys/database_roles against the deploy stack. The correction entry that references the original comes with the ledger writer |
+| REQ-54 | W1 | implemented | Decision entries (TASK-W0-04): the ledger writer stores actor, role, rung, options offered, choice, reasons, evidence, target version, workflow version, model version and decided_at in the hashed payload, with the version stamp (policy revision, skills, Mandate release and the rest) beside it. The stamp has no workflow or model version, so the decision record carries them. Unit-tested on the pure record and entry; no gate writes decisions yet |
+| REQ-55 | W1 | implemented | Database protection (TASK-W0-03): schema per capability, mandate_app limited to INSERT and SELECT on ledger.entries, append-only trigger; proved by tests/journeys/database_roles. Hash chain and corrections (TASK-W0-04): entries link by previous hash from a genesis hash, verification finds any edited, deleted, inserted or reordered entry (property tests; entries cut off the end or a re-hashed suffix need the head hash from a checkpoint kept outside the table, which the signed daily checkpoint task adds); a correction is a new entry naming the original by hash; appends take an advisory lock and a unique index on previous_hash refuses a fork, proved by tests/integration/ledger against real Postgres. recorded_at is not covered by the hash |
 | REQ-60 | W1 | not started | |
 | REQ-61 | W1 | not started | |
 | REQ-62 | W1 | not started | |
