@@ -29,7 +29,7 @@ Never branch from, or depend on, unmerged work. If your task needs something tha
 - Touch only your task's listed files, plus its as-built rows. If the task cannot be done within them, stop and report; do not widen it.
 - Meet every exit criterion. Real systems only: no fakes, stubs or mocks of Paperclip, GitHub, Postgres or Temporal (ADR-017, PL-5). Unit tests cover only conditions that cannot be produced live, through the pure function that handles them.
 - Purpose names (ADR-023): no REQ, J, CTR, AD, PL or task ids in names; ids appear only in `@pytest.mark.req("REQ-nn")` markers.
-- Never touch a protected path (PL-16: `CLAUDE.md`, `.claude/agents/`, `.cursor/rules`, `.gitmodules`, `docs/specification/adr/`, `docs/specification/product/`, `tests/journeys/`, `tests/verify/`, `Makefile`, `[tool.*]` in `pyproject.toml`, `.importlinter`, `.pre-commit-config.yaml`) unless your task lists that file. If it does, say so in the PR body under "Protected paths", because KD must approve it.
+- Never touch a protected path (PL-16: `CLAUDE.md`, `.claude/agents/`, `.cursor/rules`, `.gitmodules`, `docs/specification/adr/`, `docs/specification/product/`, `tests/journeys/`, `tests/verify/`, `Makefile`, `[tool.*]` in `pyproject.toml`, `.importlinter`, `.pre-commit-config.yaml`) unless your task lists that file. If it does, say so in the PR body under "Protected paths": a second, independent challenger must approve it.
 - No secrets anywhere: not in code, tests, logs, commits or PR text. Settings read files under `~/.mandate/secrets/<env>/`. Never read `~/.mandate/secrets/build/` folders other than through `scripts/swarm/as_role.sh builder`.
 - No em dashes in docs, comments, commit messages or PR text.
 
@@ -37,13 +37,14 @@ Never branch from, or depend on, unmerged work. If your task needs something tha
 
 Run, in the worktree, and keep the output:
 ```bash
-make setup && make check && make test
+env -u GITHUB_TOKEN -u GH_TOKEN bash -c 'make setup && make check && make test'
 ```
-plus the task's verify command for every journey it touches. All must pass before you push. If a check fails for a reason outside your task, stop and report it.
+(KD's `GITHUB_TOKEN` must never reach code under test.)
+plus the task's verify command for every journey it touches, also under `env -u GITHUB_TOKEN -u GH_TOKEN` (journeys reach GitHub only through the test App's key, never KD's token). All must pass before you push. If a check fails for a reason outside your task, stop and report it.
 
 ## Commit, push, open the PR (as mandate-builder only)
 
-Every git write and every GitHub call goes through the builder identity, never KD's (`nikd10x`) and never plain `gh`:
+Every git write and every GitHub call goes through the builder identity, never a person's account (`nikd10x`, `0xbeefdead`) and never plain `gh`:
 ```bash
 S=$(git rev-parse --show-toplevel)/scripts/swarm
 $S/as_role.sh builder git commit -m "<what the task delivers>"
