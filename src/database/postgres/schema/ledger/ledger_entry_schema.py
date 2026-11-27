@@ -2,7 +2,8 @@
 
 The database refuses UPDATE, DELETE and TRUNCATE here for every role except inside a
 migration that marks its own transaction for it (ledger.rewrite_permits). mandate_app may
-only select, and insert the columns it supplies; the sequence and recorded_at are assigned by
+only select, and insert the columns it supplies (the entry's id, type, payload and hashes); the sequence and recorded_at are
+assigned by
 the database.
 
 The owner role is not stopped by this. mandate_owner owns the table, so it can disable or
@@ -14,7 +15,7 @@ these rows is what detects a rewrite that does happen.
 
 import uuid
 
-from sqlalchemy import BigInteger, Column, Identity, Text, TIMESTAMP, UUID, func
+from sqlalchemy import BigInteger, Column, Identity, Index, Text, TIMESTAMP, UUID, func
 from sqlalchemy.dialects.postgresql import JSONB
 
 from src.database.postgres.schema.base_postgres_schema import BasePostgres
@@ -26,11 +27,20 @@ class LedgerEntrySchema(BasePostgres):
     """One signed fact in the ledger."""
 
     __tablename__ = "entries"
-    __table_args__ = {"schema": LEDGER_SCHEMA}
+    __table_args__ = (
+        # No two entries may follow the same entry, so the chain cannot fork even from a writer
+        # that skipped the append lock. The first entry links to a fixed genesis hash, so it
+        # is covered too.
+        Index("entries_previous_hash_key", "previous_hash", unique=True),
+        Index("entries_entry_hash_key", "entry_hash", unique=True),
+        {"schema": LEDGER_SCHEMA},
+    )
 
     sequence = Column(BigInteger, Identity(always=True), primary_key=True)
     entry_id = Column(UUID(as_uuid=True), nullable=False, unique=True, default=uuid.uuid4)
     entry_type = Column(Text, nullable=False)
+    # The writer stores {"content": ..., "version_stamp": ...} here, so the stamp is kept with
+    # the entry without a column the runtime role would need more rights to fill.
     payload = Column(JSONB, nullable=False)
     previous_hash = Column(Text, nullable=True)
     entry_hash = Column(Text, nullable=True)
