@@ -34,7 +34,11 @@ def _broken(programme: Programme) -> Programme:
         update={
             "repos": (*programme.config.repos, "mandate-no-such-repo"),
             "roles": (*programme.config.roles, RoleSetup(name="verifier", agent="nobody")),
-            "workflow": WorkflowPin(contract="sdd-delivery/v2", version="v9.9.9"),
+            "workflow": WorkflowPin(
+                contract="sdd-delivery/v2",
+                skills_repo="drivestream-lab/prayog-skills",
+                version="v9.9.9",
+            ),
         }
     )
     return programme.model_copy(update={"config": config})
@@ -67,12 +71,29 @@ async def test_each_failure_is_shown_with_its_cause_and_nothing_starts(
     assert by_check[ReadinessCheckType.REPOSITORY_ACCESS].subject == "mandate-no-such-repo"
     assert "404" in by_check[ReadinessCheckType.REPOSITORY_ACCESS].cause
     assert (
-        "at v0.5.6, the programme pins sdd-delivery/v2 at v9.9.9"
+        "at v0.5.6, the programme pins sdd-delivery/v2 from drivestream-lab/prayog-skills at v9.9.9"
         in by_check[ReadinessCheckType.WORKFLOW].cause
     )
     with pytest.raises(ProgrammeNotReadyError) as stopped:
         await readiness.require_ready(broken)
     assert stopped.value.report == report
+
+
+async def test_a_pin_to_a_tag_that_does_not_exist_fails_with_its_cause(
+    readiness: ProgrammeReadinessService,
+    programme: Programme,
+    meta_commit_pinning_a_missing_tag: str,
+) -> None:
+    pinned = programme.model_copy(update={"meta_commit": meta_commit_pinning_a_missing_tag})
+    config = programme.config.model_copy(
+        update={"workflow": programme.config.workflow.model_copy(update={"version": "v9.9.9"})}
+    )
+
+    report = await readiness.check(pinned.model_copy(update={"config": config}))
+
+    assert [f.check for f in report.failures] == [ReadinessCheckType.WORKFLOW]
+    assert "drivestream-lab/prayog-skills@v9.9.9 workflow does not load" in report.failures[0].cause
+    assert "404" in report.failures[0].cause
 
 
 @pytest.mark.req("REQ-40")

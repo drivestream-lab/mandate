@@ -48,6 +48,7 @@ class WorkflowPin(_Config):
     """The delivery workflow the programme is pinned to."""
 
     contract: str = Field(min_length=1)
+    skills_repo: str = Field(min_length=1)
     version: str = Field(min_length=1)
 
 

@@ -25,5 +25,6 @@ decision_owners:
   housekeeping: kd
 workflow:
   contract: sdd-delivery/v2
+  skills_repo: drivestream-lab/prayog-skills
   version: v0.5.6
 starting_rung: L0

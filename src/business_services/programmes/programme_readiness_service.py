@@ -1,8 +1,8 @@
 """Shows whether a programme can start, and names each thing that stops it.
 
 Four checks: every role has a usable agent; GitHub access works for every repo; the pinned
-workflow (delivery contract and skills release) matches the meta repo's harness pin at the
-programme's commit; and Mandate's own Paperclip agent
+workflow loads (the meta repo's harness pin at the programme's commit names a skills repo and
+release, and that release's workflow.yaml is read and parsed); and Mandate's own Paperclip agent
 cannot create agents or skills or assign tasks. The agent's permission flags alone do not deny
 the last two on the pinned Paperclip, so the interaction permissions and a company skill-policy
 deny rule are read as well. Every check runs and each failure carries its cause.
@@ -18,7 +18,7 @@ from src.business_services.programmes.programme_from_meta_service import (
 )
 from src.exceptions.app_exceptions import BaseAppException
 from src.infra_services.paperclip_service import PaperclipError, PaperclipService
-from src.models.paperclip_models import PaperclipAgent, SkillPolicy
+from src.models.paperclip_models import PaperclipAgent, SkillPolicy, SkillPolicySubject
 from src.models.programme_models import (
     Programme,
     ReadinessCheckType,
@@ -40,12 +40,20 @@ _SKILL_ACTIONS = frozenset(
     }
 )
 _HARNESS_PIN_PATH = ".harness-pin.yaml"
+_WORKFLOW_PATH = "workflow.yaml"
 
 
 class _SkillsPin(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    repo: str
     ref: str
+
+
+class _WorkflowHeader(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    contract: str
 
 
 class _HarnessPin(BaseModel):
@@ -103,7 +111,7 @@ class ProgrammeReadinessService(BaseBusinessService):
             cause = (
                 f"no agent named {role.agent} in the company"
                 if agent is None
-                else _unusable_cause(agent)
+                else agent_unusable_cause(agent)
             )
             if cause:
                 failures.append(_failure(ReadinessCheckType.ROLE_AGENT, role.name, cause))
@@ -127,11 +135,27 @@ class ProgrammeReadinessService(BaseBusinessService):
             )
         except (RepositoryAccessError, yaml.YAMLError, ValidationError) as error:
             return [_failure(ReadinessCheckType.WORKFLOW, pin.contract, f"does not load: {error}")]
-        found = (harness.delivery_contract, harness.agent_skills.ref)
-        if found == (pin.contract, pin.version):
-            return []
-        cause = f"the meta repo pins {found[0]} at {found[1]}, the programme pins {pin.contract} at {pin.version}"
-        return [_failure(ReadinessCheckType.WORKFLOW, pin.contract, cause)]
+        skills = harness.agent_skills
+        found = (harness.delivery_contract, skills.repo, skills.ref)
+        if found != (pin.contract, pin.skills_repo, pin.version):
+            cause = (
+                f"the meta repo pins {found[0]} from {found[1]} at {found[2]}, "
+                f"the programme pins {pin.contract} from {pin.skills_repo} at {pin.version}"
+            )
+            return [_failure(ReadinessCheckType.WORKFLOW, pin.contract, cause)]
+        try:
+            workflow = _WorkflowHeader.model_validate(
+                yaml.safe_load(
+                    await self._repositories.read_file(skills.repo, _WORKFLOW_PATH, skills.ref)
+                )
+            )
+        except (RepositoryAccessError, yaml.YAMLError, ValidationError) as error:
+            cause = f"{skills.repo}@{skills.ref} workflow does not load: {error}"
+            return [_failure(ReadinessCheckType.WORKFLOW, pin.contract, cause)]
+        if workflow.contract != pin.contract:
+            cause = f"the workflow at {skills.ref} is for {workflow.contract}, not {pin.contract}"
+            return [_failure(ReadinessCheckType.WORKFLOW, pin.contract, cause)]
+        return []
 
     async def _mandate_agent_limits(self) -> list[ReadinessFailure]:
         agent_id = self._paperclip.agent_id
@@ -149,27 +173,45 @@ class ProgrammeReadinessService(BaseBusinessService):
             causes.append("it may assign tasks to agents")
         if interactions.can_configure_other_agents:
             causes.append("it may configure other agents")
-        if not _skills_denied(policy, agent_id):
-            causes.append("the company skill policy does not deny it every skill action")
+        for action in sorted(_SKILL_ACTIONS):
+            if not _skill_action_denied(policy, agent, action):
+                causes.append(f"the company skill policy does not deny it {action}")
         return [_failure(subject, agent.name, cause) for cause in causes]
 
 
-def _unusable_cause(agent: PaperclipAgent) -> str | None:
+def agent_unusable_cause(agent: PaperclipAgent) -> str | None:
     if agent.lifecycle_state != "ready" or agent.status not in _USABLE_STATUSES:
         return f"agent {agent.name} is not usable: status {agent.status}, state {agent.lifecycle_state}"
     return None
 
 
-def _skills_denied(policy: SkillPolicy, agent_id: str) -> bool:
-    denied = {
-        action
-        for rule in policy.rules
-        if rule.effect == "deny"
-        and rule.subject.type == "agents"
-        and agent_id in rule.subject.agent_ids
-        for action in rule.actions
-    }
-    return _SKILL_ACTIONS <= denied
+def _skill_action_denied(policy: SkillPolicy, agent: PaperclipAgent, action: str) -> bool:
+    """Decide the way the pinned Paperclip does: the first matching rule by priority, then id.
+
+    A rule that names resources covers only some skills: a deny of that kind does not count
+    as a denial, and an allow of that kind counts against it. With no policy stored, or no
+    matching rule, the default effect decides.
+    """
+    if not policy.materialized:
+        return False
+    for rule in sorted(policy.rules, key=lambda r: (r.priority, r.id)):
+        if action not in rule.actions or not _subject_matches(rule.subject, agent):
+            continue
+        if rule.resources:
+            if rule.effect == "allow":
+                return False
+            continue
+        return rule.effect == "deny"
+    return policy.default_effect == "deny"
+
+
+def _subject_matches(subject: SkillPolicySubject, agent: PaperclipAgent) -> bool:
+    if subject.type == "all_agents":
+        return True
+    if subject.type == "agents":
+        return agent.id in subject.agent_ids
+    role = agent.role.strip().lower()
+    return bool(role) and any(r.strip().lower() == role for r in subject.roles)
 
 
 def _failure(check: ReadinessCheckType, subject: str, cause: str) -> ReadinessFailure:

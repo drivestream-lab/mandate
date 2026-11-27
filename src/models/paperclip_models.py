@@ -180,7 +180,8 @@ class PaperclipAgent(_PaperclipRecord):
     id: str
     name: str
     status: str
-    lifecycle_state: str = "ready"
+    role: str
+    lifecycle_state: str
     permissions: AgentPermissions = AgentPermissions()
 
 
@@ -202,21 +203,25 @@ class SkillPolicySubject(_PaperclipRecord):
 
     type: str
     agent_ids: tuple[str, ...] = ()
+    roles: tuple[str, ...] = ()
 
 
 class SkillPolicyRule(_PaperclipRecord):
     """One rule of the company skill policy."""
 
     id: str
+    priority: int = 0
     effect: str
     subject: SkillPolicySubject
     actions: tuple[str, ...] = ()
+    resources: dict[str, object] | None = None
 
 
 class SkillPolicy(_PaperclipRecord):
     """The company skill policy."""
 
     default_effect: str
+    materialized: bool = True
     rules: tuple[SkillPolicyRule, ...] = ()
 
 
