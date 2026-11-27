@@ -1,4 +1,4 @@
-.PHONY: setup check check-ci format format-check lint lint-check types layers test run deploy deploy-down verify
+.PHONY: setup check check-ci format format-check lint lint-check types layers test journeys run deploy deploy-down verify
 
 setup:
 	@bash scripts/setup_dev.sh
@@ -27,6 +27,17 @@ layers:
 
 test:
 	.venv/bin/pytest tests/unit/ -v
+
+# make journeys: the end-to-end journeys against the local ephemeral stack. Extra paths and
+# pytest options pass through after a double dash: make journeys -- tests/journeys/foo.py -x
+# With none, every journey under tests/journeys runs. (W0-06 builds the stack they run on.)
+ifneq ($(filter journeys,$(MAKECMDGOALS)),)
+JOURNEY_ARGS := $(filter-out journeys,$(MAKECMDGOALS))
+$(JOURNEY_ARGS): ; @:
+endif
+
+journeys:
+	.venv/bin/pytest $(if $(JOURNEY_ARGS),$(JOURNEY_ARGS),tests/journeys) -v
 
 run:
 	.venv/bin/python -m src.main

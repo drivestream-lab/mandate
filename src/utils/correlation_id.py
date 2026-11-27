@@ -6,6 +6,7 @@ import uuid
 from fastapi import Request, Response
 from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.types import ASGIApp
 
 from src.logging import get_logger, set_correlation_id
 
@@ -32,7 +33,7 @@ def _set_correlation_on_span(correlation_id: str) -> None:
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
     """Single HTTP tracing boundary: one correlation ID per request for logs and responses."""
 
-    def __init__(self, app, header_name: str = _HEADER_NAME) -> None:
+    def __init__(self, app: ASGIApp, header_name: str = _HEADER_NAME) -> None:
         super().__init__(app)
         self.header_name = header_name
 

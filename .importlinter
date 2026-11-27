@@ -1,6 +1,8 @@
 [importlinter]
 root_packages =
     src
+    temporalio
+include_external_packages = True
 
 [importlinter:contract:layer-architecture]
 name = Layered architecture — no cross-layer imports
@@ -10,3 +12,48 @@ layers =
     src.business_services
     src.database.postgres.repository
     src.database.postgres.schema
+
+[importlinter:contract:engine-no-io]
+name = engine imports no IO layer
+type = forbidden
+source_modules =
+    src.engine
+forbidden_modules =
+    src.api
+    src.business_services
+    src.database
+    src.infra_services
+    src.di
+    src.configs
+    src.common
+
+[importlinter:contract:workflow-import-boundary]
+name = Only engine.workflows imports temporalio.workflow
+type = forbidden
+source_modules =
+    src
+forbidden_modules =
+    temporalio.workflow
+ignore_imports =
+    src.engine.workflows.** -> temporalio.workflow
+# No workflow exists yet, so the ignore has nothing to match until the first one lands.
+unmatched_ignore_imports_alerting = none
+
+[importlinter:contract:context-gateway-boundary]
+name = context_main imports only models, engine and its own infra client
+type = forbidden
+source_modules =
+    src.context_main
+forbidden_modules =
+    src.api
+    src.app
+    src.main
+    src.worker_main
+    src.business_services
+    src.database
+    src.di
+    src.common
+    src.infra_services.base_infra_service
+    src.infra_services.postgres_service
+    src.infra_services.redis_service
+    src.infra_services.telemetry_service

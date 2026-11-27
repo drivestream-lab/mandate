@@ -38,7 +38,9 @@ def main() -> int:
         print("ok: /health answers status ok")
 
     status, body = _get(f"{base}/health?detailed=true")
-    services = json.loads(body).get("services", {}) if status == 200 else {}
+    services: dict[str, dict[str, object]] = (
+        json.loads(body).get("services", {}) if status == 200 else {}
+    )
     down = [name for name in ("postgres", "redis") if services.get(name, {}).get("status") != "up"]
     if status != 200 or down:
         failures.append(f"GET /health?detailed=true: {status}, not up: {', '.join(down) or 'none'}")

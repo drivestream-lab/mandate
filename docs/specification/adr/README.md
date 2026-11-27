@@ -31,3 +31,4 @@ Immutable. A change is a new ADR that supersedes the old one, with the engineeri
 | [ADR-025](ADR-025-branch-model-and-what-mandate-governs.md) | Branch model and what Mandate governs | PL-13 |
 | [ADR-026](ADR-026-launchpad-enforcement-under-mandate-product-oq-12.md) | Launchpad enforcement under Mandate (product OQ-12) | PL-14 |
 | [ADR-027](ADR-027-launchpad-credentials-product-oq-13.md) | Launchpad credentials (product OQ-13) | PL-15 |
+| [ADR-028](ADR-028-temporal-workflows-in-engine.md) | Temporal workflows live in engine/workflows | PL-2 |

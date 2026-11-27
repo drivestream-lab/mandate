@@ -9,6 +9,7 @@ from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExp
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.instrumentation.redis import RedisInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
@@ -79,7 +80,7 @@ class TelemetryService(BaseInfraService):
         metrics.set_meter_provider(meter_provider)
 
         HTTPXClientInstrumentor().instrument()
-        RedisInstrumentor().instrument()
+        BaseInstrumentor.instrument(RedisInstrumentor())
         self._instrument_sqlalchemy_engine()
 
         self._tracer_provider = tracer_provider

@@ -5,6 +5,8 @@ from typing import Any, Optional, Type, TypeVar
 from injector import Injector
 
 from src.configs.app_settings import AppSettings
+from src.business_services.base_business_service import BaseBusinessService
+from src.infra_services.base_infra_service import BaseInfraService
 from src.infra_services.postgres_service import PostgresService
 from src.infra_services.redis_service import RedisService
 from src.infra_services.telemetry_service import TelemetryService
@@ -15,13 +17,13 @@ _injector: Optional[Injector] = None
 logger = get_logger()
 
 # Postgres first — business services depend on session factory from PostgresService.
-_INFRA_SERVICE_TYPES: tuple[type, ...] = (
+_INFRA_SERVICE_TYPES: tuple[type[BaseInfraService], ...] = (
     PostgresService,
     RedisService,
     TelemetryService,
 )
 
-_BUSINESS_SERVICE_TYPES: tuple[type, ...] = ()
+_BUSINESS_SERVICE_TYPES: tuple[type[BaseBusinessService], ...] = ()
 
 
 def configure_container() -> Injector:
