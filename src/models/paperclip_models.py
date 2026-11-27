@@ -168,6 +168,66 @@ class PaperclipQuestion(_PaperclipRecord):
     result: QuestionResult | None = None
 
 
+class AgentPermissions(_PaperclipRecord):
+    """The permission flags on an agent record; they do not deny interactions or skills."""
+
+    can_create_agents: bool = False
+
+
+class PaperclipAgent(_PaperclipRecord):
+    """An agent as Paperclip holds it."""
+
+    id: str
+    name: str
+    status: str
+    lifecycle_state: str = "ready"
+    permissions: AgentPermissions = AgentPermissions()
+
+
+class EffectiveInteractions(_PaperclipRecord):
+    """What an agent may do to other agents' work once overrides are applied."""
+
+    can_assign_tasks_to_agents: bool
+    can_configure_other_agents: bool
+
+
+class InteractionPermissions(_PaperclipRecord):
+    """An agent's interaction permissions."""
+
+    effective: EffectiveInteractions
+
+
+class SkillPolicySubject(_PaperclipRecord):
+    """Whom a skill-policy rule applies to."""
+
+    type: str
+    agent_ids: tuple[str, ...] = ()
+
+
+class SkillPolicyRule(_PaperclipRecord):
+    """One rule of the company skill policy."""
+
+    id: str
+    effect: str
+    subject: SkillPolicySubject
+    actions: tuple[str, ...] = ()
+
+
+class SkillPolicy(_PaperclipRecord):
+    """The company skill policy."""
+
+    default_effect: str
+    rules: tuple[SkillPolicyRule, ...] = ()
+
+
+class PaperclipProject(_PaperclipRecord):
+    """A project as Paperclip holds it."""
+
+    id: str
+    name: str
+    description: str | None = None
+
+
 class QuestionOption(BaseModel):
     """One option of a question."""
 
@@ -261,3 +321,19 @@ class QuestionRequest(PaperclipRequest):
     idempotency_key: str
     payload: QuestionPayload
     addressee_user_id: str | None = None
+
+
+class NewProject(BaseModel):
+    """A project Mandate creates for a programme."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    description: str = ""
+
+
+class ProjectRequest(PaperclipRequest):
+    """Create a project."""
+
+    name: str
+    description: str
