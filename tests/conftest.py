@@ -2,8 +2,9 @@
 
 A requirement counts as built when its row in docs/specification/as-built/requirements.md is
 marked implemented, unit-tested or live-verified. Each needs at least one test carrying
-@pytest.mark.req("REQ-nn"). The check runs on whole-suite runs only, not on a single file,
-test id, -k or -m selection.
+@pytest.mark.req("REQ-nn"). The check runs only when asked for with --require-req-coverage,
+which `make test` passes (the suite those tests live in). Other runs, such as `make journeys`,
+do not collect the unit tests and so never apply it.
 """
 
 from pathlib import Path
@@ -15,15 +16,19 @@ from tests._helpers.requirement_coverage import requirements_without_test
 _AS_BUILT = Path("docs/specification/as-built/requirements.md")
 
 
-def _is_whole_suite_run(config: pytest.Config) -> bool:
-    selected = config.getoption("keyword") or config.getoption("markexpr")
-    return not selected and all(Path(arg).is_dir() for arg in config.args)
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--require-req-coverage",
+        action="store_true",
+        default=False,
+        help="fail the run when a built requirement has no test carrying a req marker",
+    )
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:
     config = session.config
     table = config.rootpath / _AS_BUILT
-    if not _is_whole_suite_run(config) or not table.is_file():
+    if not config.getoption("require_req_coverage") or not table.is_file():
         return
     tested = {
         str(marker.args[0])

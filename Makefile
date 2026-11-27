@@ -26,7 +26,7 @@ layers:
 	.venv/bin/lint-imports
 
 test:
-	.venv/bin/pytest tests/unit/ -v
+	.venv/bin/pytest tests/unit/ -v --require-req-coverage
 
 # make journeys: the end-to-end journeys against the local ephemeral stack. Extra paths and
 # pytest options pass through after a double dash: make journeys -- tests/journeys/foo.py -x

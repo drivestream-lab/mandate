@@ -25,7 +25,7 @@ make check && make test
 
 ## Requirement markers
 
-A test covers a requirement with `@pytest.mark.req("REQ-nn")`. On a whole-suite run
-(`make test`), every requirement whose row in
+A test covers a requirement with `@pytest.mark.req("REQ-nn")`. In `make test`
+(`--require-req-coverage`), every requirement whose row in
 `docs/specification/as-built/requirements.md` is not `not started` must have at least one
 such test, or the run stops and names the missing requirements.
