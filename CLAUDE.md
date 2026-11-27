@@ -20,11 +20,11 @@ Until Mandate governs its own development (programme two), this repo is built by
 | `AGENTS.md` (prayog v2) says | Here, instead |
 | --- | --- |
 | One Draft PR per wave, opened after `/loop-spec` | **One PR per task** from the WorkManifest, about 400 changed lines excluding generated code (ADR-021) |
-| Human applies `wave-accepted`; merges at signoff nodes | A task PR merges into `develop` through `mandate-builder` when `mandate/build-verified` (posted only by `mandate-runner`) passes on its head. KD approves protected-path PRs, and signs each wave PR from `develop` into `main` (`wave-accepted`, attested Approve, ready) and merges it |
+| Human applies `wave-accepted`; merges at signoff nodes | GitHub Apps only, no person's account (KD, 27 Nov 2026). A PR merges through `mandate-builder` when `mandate/build-verified` (posted only by `mandate-runner`) passes on its head. Protected paths need a second challenger Approve. A wave PR from `develop` into `main` is labelled `wave-accepted` and marked ready by `mandate-builder`, signed by `mandate-challenger` (`Signoff: wave` plus attestation) after the verifier checked the deployed evidence, and merged by `mandate-builder` |
 | Work tracked on the org Project board | No board (project board disabled). The WorkManifest, `docs/specification/as-built/` and the pinned build-log issue are the record |
 | Forge skills do branch, commit, push, PR | Do them directly, as `mandate-builder` through `scripts/swarm/as_role.sh`, never as KD |
 
-Roles live in `.claude/agents/`: `builder` (Sonnet 5.5), `challenger` and `second-challenger` (Opus 5.5, read-only, spec before diff), `verifier`, `integrator`. Wave B0 (the swarm itself) is the exception: KD merges every B0 PR.
+Roles live in `.claude/agents/`: `builder` (Sonnet 5.5), `challenger` and `second-challenger` (Opus 5.5, read-only, spec before diff), `verifier`, `integrator`. KD can audit any PR, and suspending `mandate-builder` stops all merging at once.
 
 The prayog content skills (`/spec-draft`, `/loop-spec` and the like) are not used for this build.
 
@@ -66,25 +66,31 @@ Ask KD in the PR or the chat. Do not guess intent from code that is not there ye
 | Lead, builders, integrator | `mandate-builder` (App 5860819) | `scripts/swarm/as_role.sh builder git ...` and `... builder gh ...` |
 | Challengers | `mandate-challenger` (App 5860827) | `scripts/swarm/as_role.sh challenger gh ...` |
 | Runner | `mandate-runner` (App 5860839) | Never used by the swarm. Its folder under `~/.mandate/secrets/build/` is never read or mounted |
-| KD | `nikd10x` | Never used by the swarm: no commit, review, approval, merge or attestation as KD |
+| People | `nikd10x`, `0xbeefdead` | Never used by the swarm: no commit, review, approval, label, merge or attestation. No rule counts a person's review |
 
 `GITHUB_TOKEN` on the lab machine is KD's own token. Never run plain `gh` or `git push`; `as_role.sh` removes it and mints the role's App token (`scripts/swarm/app_token.sh`, git credential helper `scripts/swarm/git-credential-mandate-app`). Each role reads only its own App's folder.
 
 ### Each round
 
 1. **Rebuild state** from the repos and GitHub, never from memory: the WorkManifest (`mandate-meta` plan section 9), `docs/specification/as-built/requirements.md`, open and merged PRs on `mandate` and `mandate-control-tower` with their statuses and reviews, open `develop-red` issues, and the pinned build-log issue.
-2. **Red develop first.** While a runner-opened `develop-red` issue is open, merge nothing. Start the `verifier` on it, then a builder on the fix (`Fixes #N` in the body); it needs KD's Approve, so that is a stop.
-3. **Merge what is ready.** For each open task PR whose `mandate/build-verified` is green on the current head: if it touches a protected path (PL-16 list plus `.gitmodules`) and KD has not approved that head, stop and ask KD. Otherwise run `scripts/swarm/merge_task.sh <repo> <pr>`, which refuses unless base is `develop`, the runner's status is green on the head and develop is not red, and merges with the sha pinned. Never post a status.
-4. **Reviews.** For each task PR head without a challenger review, start `challenger` on it. If the diff touches a trust-critical path (the runner config's `trust_critical_paths`: ledger, signoff check, evidence verification, merge control), also start `second-challenger`, independently. A red status on a reviewed head goes to the `verifier`; its findings, or a challenger's, go back to that task's `builder` as a fix round, and the new head is reviewed again. A task whose fixes fail three rounds is a stop.
+2. **Red develop first.** While a runner-opened `develop-red` issue is open, only its fix merges. Start the `verifier` on the issue, then a builder on the fix (`Fixes #N` in the body). The fix needs `Challenger: first` and a separate `Challenger: second` on its head; then it merges like any task.
+3. **Merge what is ready.** For each open PR whose `mandate/build-verified` is green on the current head, run `scripts/swarm/merge_task.sh <repo> <pr>`. It refuses unless the base is `develop` (or `main` with head `develop`) and the runner's status is green on that head, and it merges with the sha pinned. The runner encodes every review rule, so never merge on any other signal, and never post a status.
+4. **Evidence, then reviews.** For each PR head without them:
+   - start the `verifier` in evidence mode: it deploys the head in its worktree (`make deploy` with its own `DEPLOY_PROJECT` and port), runs `make verify` as a black-box test, checks the deployed app's tables and logs for what the task claims, and posts the evidence as a PR comment (as `mandate-challenger`);
+   - then start `challenger` (spec, then diff, then the verifier's evidence);
+   - if the diff touches a trust-critical path (the runner config's `trust_critical_paths`: ledger, signoff check, evidence verification, merge control) or a protected path (PL-16 list plus `.gitmodules`), also start `second-challenger`, independently.
+
+   A red status, missing evidence, or a challenger's findings go back to that task's `builder` as a fix round, and the new head is verified and reviewed again. A task whose fixes fail three rounds is a stop.
 5. **Keep PRs current.** PRs behind or conflicting with `develop` go to the `integrator`.
 6. **Start ready tasks.** Every task of the current wave whose `depends_on` tasks are all merged into `develop`, and that has no open PR, gets a `builder` with branch `feature/INIT-MANDATE-001-w<n>-<task-slug>` from `origin/develop`, at most three builders running at once. Never stack a PR on unmerged work.
-7. **Close the wave.** When every task of the wave has merged and develop is green, open the wave PR from `develop` into `main` as `mandate-builder`, with a brief: tasks merged, journeys run, findings, spend. That is a stop: KD signs and merges it, and the next wave starts only once `main` has moved.
+7. **Close the wave.** When every task of the wave has merged and develop is green, open the wave PR from `develop` into `main` as `mandate-builder`, with a brief: tasks merged, journeys run, findings, spend. Then:
+   - the `verifier` in wave mode checks the lab deploy of the develop head (the runner's develop run, `lab-mandate`'s tables and logs) against every exit criterion of the wave, and posts the evidence;
+   - when it holds, `mandate-builder` adds `wave-accepted` and marks the PR ready, and the verifier posts the signoff as `mandate-challenger`: an Approve whose body has `Signoff: wave`, `Initiative: INIT-MANDATE-001` and `Head: <full head sha>`, and no challenger marker;
+   - when the runner is green on that head, `merge_task.sh` merges it. The next wave starts only once `main` has moved.
 8. **Record the round** as one comment on the build-log issue (below), then exit.
 
 ### Stop and wait for KD, only when
 
-- a PR touches a protected path and needs KD's Approve on its head;
-- a wave PR is open (KD adds `wave-accepted`, approves with `Initiative: INIT-MANDATE-001` and `Head: <sha>`, marks it ready, merges);
 - the spec is unclear or contradicts itself, or a decision is not covered by the PRDs: post the question with options and a recommendation, never choose silently;
 - a task failed three rounds;
 - something needs KD on GitHub, Paperclip or the lab machine (rulesets, App settings, secrets, the lab env file);

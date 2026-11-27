@@ -34,7 +34,10 @@ run:
 # make deploy: build this branch in Docker and run it with its .env (on its own Postgres
 # and Redis). make verify: every journey against what deploy started, or against
 # MANDATE_SERVICE_URL when it is set (after a merge, the runner points it at the lab).
-DEPLOY_COMPOSE := docker compose -f docker/docker-compose.deploy.yml
+# DEPLOY_PROJECT and MANDATE_DEPLOY_PORT let several branches run side by side (the
+# swarm's verifier deploys each PR in its own worktree).
+DEPLOY_PROJECT ?= mandate-deploy
+DEPLOY_COMPOSE := docker compose -p $(DEPLOY_PROJECT) -f docker/docker-compose.deploy.yml
 MANDATE_DEPLOY_PORT ?= 8000
 # Inside mandate-runner's job container (it sets MANDATE_RUNNER_HEAD_SHA) the stack is
 # reached over its own network, by service name.
@@ -43,12 +46,13 @@ MANDATE_SERVICE_URL ?= http://mandate:8000
 else
 MANDATE_SERVICE_URL ?= http://localhost:$(MANDATE_DEPLOY_PORT)
 endif
-export MANDATE_SERVICE_URL MANDATE_DEPLOY_PORT
+export MANDATE_SERVICE_URL MANDATE_DEPLOY_PORT DEPLOY_PROJECT
 
 deploy:
 	$(DEPLOY_COMPOSE) up -d --build --wait --wait-timeout 300
 ifdef MANDATE_RUNNER_HEAD_SHA
-	@docker network connect mandate-deploy_default "$$(hostname)" 2>/dev/null || true
+	@docker inspect -f '{{json .NetworkSettings.Networks}}' "$$(hostname)" | grep -q '"$(DEPLOY_PROJECT)_default"' \
+		|| docker network connect "$(DEPLOY_PROJECT)_default" "$$(hostname)"
 endif
 	@echo "mandate deployed at $(MANDATE_SERVICE_URL)"
 

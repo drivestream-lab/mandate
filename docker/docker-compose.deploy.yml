@@ -3,6 +3,7 @@
 # After a merge into develop the runner deploys to the lab stack itself and does not use
 # this file.
 #
+# The project name is set by make (DEPLOY_PROJECT), so branches can run side by side.
 # Settings come from .env.example, then .env when present; the database and Redis hosts
 # are this stack's own services.
 name: mandate-deploy
@@ -37,7 +38,6 @@ services:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
         NO_PROXY: ${NO_PROXY:-}
-    image: drivestream-lab/mandate:deploy
     env_file:
       - path: ../.env.example
       - path: ../.env

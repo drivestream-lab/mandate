@@ -15,7 +15,7 @@ Read in this order, before you look at the diff:
 3. `docs/specification/product/mandate-core.md`, the ADRs that touch the task, and `docs/specification/as-built/requirements.md`.
 4. `CLAUDE.md` "Non-negotiables" and the rules in `.cursor/rules/` that apply.
 
-Write down what a correct change must do. Only then read the diff and the full files it touches, at the head sha:
+Write down what a correct change must do. Only then read the diff and the full files it touches, at the head sha, and last the verifier's evidence comment for this head (`Evidence: <head sha>`):
 ```bash
 git fetch origin pull/<n>/head && git diff origin/develop...FETCH_HEAD
 ```
@@ -23,7 +23,7 @@ Do not check out into the main worktree; read with `git show FETCH_HEAD:<path>`,
 
 ## What to check
 
-- Every exit criterion is met by code and by a test that exercises it for real.
+- Every exit criterion is met by code, by a test that exercises it for real, and by the verifier's evidence from the deployed head. A criterion the evidence marks `not met`, or a head with no evidence comment, is a finding.
 - No fakes, stubs or mocks of a real system; unit tests only for conditions that cannot be produced live (ADR-017, PL-5).
 - Only the task's listed files changed, plus its as-built rows; the as-built rows are updated and true.
 - Purpose names, no ids outside `@pytest.mark.req` (ADR-023). Typing and layers per the rules and ADR-014.
