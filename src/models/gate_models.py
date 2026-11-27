@@ -48,6 +48,18 @@ class GateBrief(BaseModel):
     evidence: tuple[EvidenceReference, ...]
     after_signoff: str = Field(min_length=1, pattern=_NON_BLANK)
 
+    def for_deciding_role(self) -> "RoleBrief":
+        """The brief as the deciding role may see it: no recommendation, no reason for it."""
+        return RoleBrief(
+            gate_class=self.gate_class,
+            title=self.title,
+            what_is_decided=self.what_is_decided,
+            options=self.options,
+            head_sha=self.head_sha,
+            evidence=self.evidence,
+            after_signoff=self.after_signoff,
+        )
+
     @model_validator(mode="after")
     def _recommendation_is_an_option(self) -> "GateBrief":
         ids = [option.option_id for option in self.options]
@@ -56,6 +68,24 @@ class GateBrief(BaseModel):
         if self.recommendation not in ids:
             raise ValueError("the recommendation is not one of the options")
         return self
+
+
+class RoleBrief(BaseModel):
+    """What the deciding role is shown: the gate's content without the author's recommendation.
+
+    The role makes its own blind call, so neither the recommended option nor the author's
+    reason for it reaches it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    gate_class: GateClassType
+    title: str
+    what_is_decided: str
+    options: tuple[BriefOption, ...]
+    head_sha: str
+    evidence: tuple[EvidenceReference, ...]
+    after_signoff: str
 
 
 class PullRequestRef(BaseModel):
@@ -68,18 +98,13 @@ class PullRequestRef(BaseModel):
 
 
 class SealedCall(BaseModel):
-    """What the opener holds after sealing: enough to reveal the call later, and nothing public.
-
-    The call and nonce live with the holder of this record (never on the pull request). The
-    ledger holds only the digest.
-    """
+    """Which gate's call was sealed, and the hash of the sealing entry. The call itself is in
+    the ledger entry, never here."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     gate_id: UUID
     sealed_entry_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    call_json: str | None = Field(description="The call as JSON, or None when there was none")
-    nonce: str | None
 
 
 class OpenedGate(BaseModel):

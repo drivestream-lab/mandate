@@ -35,7 +35,14 @@ from src.database.postgres.connection_manager import PostgresConnectionManager
 from src.database.postgres.repository.gates.gate_repository import GateRepository
 from src.database.postgres.repository.ledger.ledger_repository import LedgerRepository
 from src.infra_services.postgres_service import PostgresService
-from src.models.gate_models import BriefOption, GateBrief, GateClassType, PullRequestRef
+from src.models.gate_models import (
+    BriefOption,
+    GateBrief,
+    GateClassType,
+    OpenedGate,
+    PullRequestRef,
+    RoleBrief,
+)
 from src.models.kernel_models import NamedVersion, VersionStamp
 from src.models.ledger_models import (
     DecisionOption,
@@ -45,7 +52,6 @@ from src.models.ledger_models import (
     RungType,
     SealedCallRecord,
 )
-from src.models.role_output_models import DecidingRoleCall, read_role_output
 from tests.contract.paperclip.conftest import mandate_identity, paperclip
 from tests.journeys.journey_support import SANDBOX_REPOS, AppCredentials, SandboxGitHub
 from tests.journeys.journey_support import StackAddresses
@@ -204,19 +210,37 @@ class _PosterThatRecordsTheLedger:
         await self._pull.post_brief(pull_request, body)
 
 
+_AGENTS: dict[str, str] = {}
+
+
+def _deciding_agent(desk_: AgentDesk) -> str:
+    """One scripted deciding role for the whole run: hiring one per test starves Paperclip."""
+    company = desk_.identity.company_id
+    if company not in _AGENTS:
+        _AGENTS[company] = desk_.hire("Deciding role", "deciding_role.py")
+    return _AGENTS[company]
+
+
 class _ScriptedRole:
     """Asks the scripted deciding role on Paperclip, and counts how often it was asked."""
 
-    def __init__(self, desk_: AgentDesk, fault: bool = False) -> None:
+    def __init__(self, desk_: AgentDesk, fault: bool = False, off_list: bool = False) -> None:
         self._desk = desk_
         self._fault = fault
-        self._agent = desk_.hire("Deciding role", "deciding_role.py")
+        self._off_list = off_list
+        self.shown: list[RoleBrief] = []
+        self._agent = _deciding_agent(desk_)
         self.asked = 0
 
-    async def request_call(self, brief: GateBrief) -> str | None:
+    async def request_call(self, brief: RoleBrief) -> str | None:
         self.asked += 1
+        self.shown.append(brief)
         body: dict[str, object] = {
-            "options": [option.option_id for option in brief.options][::-1],
+            "options": (
+                ["banana"]
+                if self._off_list
+                else [option.option_id for option in brief.options][::-1]
+            ),
             "evidence": [_NOTE],
         }
         if self._fault:
@@ -268,6 +292,13 @@ def _pull_request(
     return _GitHubPullRequest(credentials, sandbox_github.create_pull_request(_REPO, branch))
 
 
+async def _sealed_record(postgres: PostgresService, opened: OpenedGate) -> SealedCallRecord:
+    async with postgres.get_session() as session:
+        stored = await LedgerRepository().get_by_hash(session, opened.sealed.sealed_entry_hash)
+    assert stored is not None
+    return SealedCallRecord.model_validate(stored.payload)
+
+
 async def _types(postgres: PostgresService) -> list[str]:
     async with postgres.get_session() as session:
         return [e.entry_type for e in await LedgerRepository().read_all(session)]
@@ -302,33 +333,35 @@ async def test_call_is_sealed_hidden_from_the_pull_request_and_revealed_after_si
 
     # The call was hashed into the ledger before the brief was posted.
     assert poster.observed.ledger_types_at_post == (LedgerEntryType.SEALED_CALL,)
-    call = read_role_output(DecidingRoleCall, opened.sealed.call_json)
+    record = await _sealed_record(postgres, opened)
+    call, nonce = record.call, record.nonce
     assert call is not None and call.option == "hold" and call.evidence_cited == (_NOTE,)
-    assert opened.sealed.nonce is not None
+    assert nonce is not None
+    # The role was never shown the author's recommendation or its reason.
+    shown = role.shown[0].model_dump_json()
+    assert "Lost sends cost more than a retry" not in shown
+    assert "recommend" not in shown
     # The brief is on the pull request, and nothing on the pull request holds the call.
     on_github = pull.everything_on_it()
     for part in (head, "Whether delivery retries failed sends", "Impact: Fewer lost sends",
                  "Recommended: **ship**", "The retry merges and the next wave starts"):  # fmt: skip
         assert part in on_github
-    for secret in (call.reasons[0], _NOTE, opened.sealed.nonce, opened.sealed.sealed_entry_hash,
+    for secret in (call.reasons[0], _NOTE, nonce, opened.sealed.sealed_entry_hash,
                    "Deciding role"):  # fmt: skip
         assert secret not in on_github
-    async with postgres.get_session() as session:
-        stored = await LedgerRepository().get_by_hash(session, opened.sealed.sealed_entry_hash)
-    assert stored is not None
-    digest = SealedCallRecord.model_validate(stored.payload).call_digest
-    assert digest is not None and digest not in on_github
-    assert "hold" not in stored.payload.values()
+    assert record.call_digest is not None and record.call_digest not in on_github
 
     # Reveal is refused until the signoff is recorded, and the ledger is untouched.
     with pytest.raises(SignoffNotRecordedError):
-        await sealed_calls.reveal(opened.sealed, signoff_recorded=False, stamp=_STAMP)
+        await sealed_calls.reveal(opened.gate_id, signoff_recorded=False, stamp=_STAMP)
     assert await _types(postgres) == [LedgerEntryType.SEALED_CALL]
     # The holder signs off (their decision is recorded), and then the reveal is allowed.
     await LedgerAppendService(postgres, LedgerRepository()).append_decision(
         _holder_decision(head), _STAMP
     )
-    await sealed_calls.reveal(opened.sealed, signoff_recorded=True, stamp=_STAMP)
+    # A fresh service instance, holding nothing in memory, reveals from the ledger alone.
+    _, restarted = _services(postgres)
+    await restarted.reveal(opened.gate_id, signoff_recorded=True, stamp=_STAMP)
     assert await _types(postgres) == [
         LedgerEntryType.SEALED_CALL,
         LedgerEntryType.DECISION,
@@ -357,7 +390,7 @@ async def test_verification_gate_shows_the_recommendation_with_its_evidence(
         _STAMP,
     )
 
-    call = read_role_output(DecidingRoleCall, opened.sealed.call_json)
+    call = (await _sealed_record(postgres, opened)).call
     assert call is not None
     on_github = pull.everything_on_it()
     assert "Deciding role's recommendation" in on_github
@@ -383,10 +416,27 @@ async def test_call_that_never_fits_its_schema_is_asked_for_once_more_then_count
     )  # fmt: skip
 
     assert role.asked == 2
-    assert opened.sealed.call_json is None
-    async with postgres.get_session() as session:
-        stored = await LedgerRepository().get_by_hash(session, opened.sealed.sealed_entry_hash)
-    assert stored is not None
-    assert SealedCallRecord.model_validate(stored.payload).call_digest is None
+    record = await _sealed_record(postgres, opened)
+    assert record.call is None and record.call_digest is None
     with pytest.raises(SealedCallMismatchError):
-        await sealed_calls.reveal(opened.sealed, signoff_recorded=True, stamp=_STAMP)
+        await sealed_calls.reveal(opened.gate_id, signoff_recorded=True, stamp=_STAMP)
+
+
+@pytest.mark.req("REQ-118")
+async def test_call_for_an_option_not_offered_is_asked_for_once_more_then_counts_as_none(
+    postgres: PostgresService,
+    desk: AgentDesk,
+    sandbox_github: SandboxGitHub,
+    test_app_credentials: AppCredentials,
+) -> None:
+    pull = _pull_request(sandbox_github, test_app_credentials, "off-list-gate")
+    opening, _ = _services(postgres)
+    role = _ScriptedRole(desk, off_list=True)
+
+    opened = await opening.open_gate(
+        uuid.uuid4(), _brief(GateClassType.INTENT, pull.head_sha()), pull.ref, role,
+        _PosterThatRecordsTheLedger(pull, postgres), _STAMP,
+    )  # fmt: skip
+
+    assert role.asked == 2
+    assert (await _sealed_record(postgres, opened)).call is None

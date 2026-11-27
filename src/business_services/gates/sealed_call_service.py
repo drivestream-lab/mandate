@@ -22,7 +22,7 @@ from src.database.postgres.repository.ledger.ledger_repository import LedgerRepo
 from src.engine.gates.brief import call_digest
 from src.exceptions.app_exceptions import BaseAppException
 from src.infra_services.postgres_service import PostgresService
-from src.models.gate_models import GateBrief, SealedCall
+from src.models.gate_models import GateBrief, RoleBrief, SealedCall
 from src.models.kernel_models import VersionStamp
 from src.models.ledger_models import (
     CallRevealRecord,
@@ -39,7 +39,7 @@ CALL_ATTEMPTS = 2
 class DecidingRoleCallSource(Protocol):
     """Asks the deciding role for its call on a gate; returns its raw answer, or None."""
 
-    async def request_call(self, brief: GateBrief) -> str | None: ...
+    async def request_call(self, brief: RoleBrief) -> str | None: ...
 
 
 class SignoffNotRecordedError(BaseAppException):
@@ -78,10 +78,16 @@ class SealedCallService(BaseBusinessService):
     async def obtain_call(
         self, source: DecidingRoleCallSource, brief: GateBrief
     ) -> DecidingRoleCall | None:
-        """The role's call, asking again once when the first answer is missing or invalid."""
+        """The role's call, asking again once when the first answer is missing or invalid.
+
+        The role is shown the brief without the author's recommendation. A call that picks an
+        option the brief does not offer is invalid.
+        """
+        offered = {option.option_id for option in brief.options}
+        shown = brief.for_deciding_role()
         for _ in range(CALL_ATTEMPTS):
-            call = read_role_output(DecidingRoleCall, await source.request_call(brief))
-            if call is not None:
+            call = read_role_output(DecidingRoleCall, await source.request_call(shown))
+            if call is not None and call.option in offered:
                 return call
         return None
 
@@ -97,42 +103,45 @@ class SealedCallService(BaseBusinessService):
         nonce = None if call is None else secrets.token_hex(16)
         digest = None if call is None or nonce is None else call_digest(gate_id, call, nonce)
         entry = await self._ledger.append_sealed_call_in(
-            session, SealedCallRecord(gate_id=gate_id, head_sha=head_sha, call_digest=digest), stamp
+            session,
+            SealedCallRecord(
+                gate_id=gate_id, head_sha=head_sha, call_digest=digest, call=call, nonce=nonce
+            ),
+            stamp,
         )
         if entry.entry_hash is None:
             raise SealedCallMismatchError("the sealing entry has no hash")
-        return SealedCall(
-            gate_id=gate_id,
-            sealed_entry_hash=entry.entry_hash,
-            call_json=None if call is None else call.model_dump_json(),
-            nonce=nonce,
-        )
+        return SealedCall(gate_id=gate_id, sealed_entry_hash=entry.entry_hash)
 
     async def reveal(
-        self, sealed: SealedCall, signoff_recorded: bool, stamp: VersionStamp
+        self, gate_id: UUID, signoff_recorded: bool, stamp: VersionStamp
     ) -> StoredLedgerEntry:
-        """Write the call into the ledger, only once the holder's signoff is recorded."""
+        """Write the sealed call into the ledger, only once the holder's signoff is recorded.
+
+        The call is read back from the sealing entry, so this works after a restart.
+        """
         if not signoff_recorded:
             raise SignoffNotRecordedError()
-        if sealed.call_json is None or sealed.nonce is None:
-            raise SealedCallMismatchError("this gate sealed no call, so there is nothing to reveal")
-        call = DecidingRoleCall.model_validate_json(sealed.call_json)
         async with self._postgres.transaction() as session:
-            entry = await self._ledger_repository.get_by_hash(session, sealed.sealed_entry_hash)
-            if entry is None or entry.entry_type != LedgerEntryType.SEALED_CALL:
-                raise SealedCallMismatchError("no sealed call has that hash")
+            entry = await self._ledger_repository.find_by_type_and_gate(
+                session, LedgerEntryType.SEALED_CALL, gate_id
+            )
+            if entry is None or entry.entry_hash is None:
+                raise SealedCallMismatchError("no call was sealed for this gate")
             record = SealedCallRecord.model_validate(entry.payload)
-            if record.gate_id != sealed.gate_id or record.call_digest != call_digest(
-                sealed.gate_id, call, sealed.nonce
-            ):
-                raise SealedCallMismatchError("the call is not the one that was sealed")
+            if record.call is None or record.nonce is None:
+                raise SealedCallMismatchError(
+                    "this gate sealed no call, so there is nothing to reveal"
+                )
+            if record.call_digest != call_digest(gate_id, record.call, record.nonce):
+                raise SealedCallMismatchError("the stored call does not match its digest")
             return await self._ledger.append_call_reveal_in(
                 session,
                 CallRevealRecord(
-                    gate_id=sealed.gate_id,
-                    sealed_entry_hash=sealed.sealed_entry_hash,
-                    call=call,
-                    nonce=sealed.nonce,
+                    gate_id=gate_id,
+                    sealed_entry_hash=entry.entry_hash,
+                    call=record.call,
+                    nonce=record.nonce,
                 ),
                 stamp,
             )

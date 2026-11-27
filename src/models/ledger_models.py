@@ -110,8 +110,9 @@ class DecisionRecord(BaseModel):
 class SealedCallRecord(BaseModel):
     """A gate's deciding-role call, sealed before the gate's brief is posted.
 
-    Only the digest is kept here. A gate that got no valid call records that, with no digest,
-    so the absence is on the ledger too.
+    The call and its nonce are kept beside the digest, so the call survives a restart and can
+    be revealed from the ledger alone. They are never put on the pull request. A gate that got
+    no valid call records that (no digest, call or nonce), so the absence is on the ledger too.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -121,6 +122,15 @@ class SealedCallRecord(BaseModel):
     call_digest: str | None = Field(
         pattern=_HEX_SHA256, description="Digest of the call and its nonce; None when no call"
     )
+    call: DecidingRoleCall | None = Field(description="The sealed call; None when there was none")
+    nonce: str | None = Field(description="The nonce in the digest; None when there was no call")
+
+    @model_validator(mode="after")
+    def _call_digest_and_nonce_go_together(self) -> "SealedCallRecord":
+        present = [self.call is not None, self.nonce is not None, self.call_digest is not None]
+        if any(present) and not all(present):
+            raise ValueError("a sealed call needs its call, nonce and digest together")
+        return self
 
 
 class CallRevealRecord(BaseModel):
