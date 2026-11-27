@@ -8,7 +8,7 @@ Requirement text lives in `mandate-meta/prd/INIT-MANDATE-001.md`; this table tra
 | --- | --- | --- | --- |
 | REQ-01 | W1 | not started | |
 | REQ-02 | W1 | not started | |
-| REQ-39 | W1 | not started | |
+| REQ-39 | W1 | implemented | The brief text (what is decided, options with impact, recommendation and why, evidence bound to the head commit, what follows) posted on a sandbox pull request (TASK-W0-10); tests/unit/engine/gates, tests/journeys/decide_blind_first. Delivery to real gate pull requests and the signoff artifacts are W1 |
 | REQ-40 | W1 | implemented | Mandate's Paperclip identity only (TASK-W0-07): its client acts inside its own run, refuses an unpinned release, and cannot create agents or skills or assign tasks; proved by tests/contract/paperclip against the run stack. Deciding gates comes later |
 | REQ-42 | W1 | not started | |
 | REQ-43 | W1 | not started | |
@@ -19,9 +19,9 @@ Requirement text lives in `mandate-meta/prd/INIT-MANDATE-001.md`; this table tra
 | REQ-62 | W1 | not started | |
 | REQ-63 | W1 | not started | |
 | REQ-86 | W1 | not started | |
-| REQ-103 | W1 | not started | |
+| REQ-103 | W1 | implemented | The call is sealed in the ledger before the brief is posted, absent from the pull request at intent and design gates, shown at verification and housekeeping gates, and revealed only behind an explicit signoff-recorded input (TASK-W0-10); tests/journeys/decide_blind_first reads the pull request back. Reading the holder's signoff itself is W1 |
 | REQ-108 | W1 | not started | |
-| REQ-118 | W1 | implemented | The deciding role's structured call (option, reasons, evidence cited) only (TASK-W0-08): a scripted deciding role on Paperclip's process adapter returns it, checked against the shared model, and an output that fails its schema counts as missing; proved by tests/journeys/test_agents against the run stack. Gate classes and blind-first sealing come later |
+| REQ-118 | W1 | implemented | The deciding role's structured call (option, reasons, evidence cited) only (TASK-W0-08): a scripted deciding role on Paperclip's process adapter returns it, checked against the shared model, and an output that fails its schema counts as missing; proved by tests/journeys/test_agents against the run stack. Sealing, the one retry and the no-call record are in TASK-W0-10 (tests/journeys/decide_blind_first) |
 | REQ-120 | W1 | unit-tested | scripts/record_review_decision.py writes a decision as a ledger-format JSON line to a local file; tests/unit/test_review_decision.py (TASK-W0-01). The import into the ledger is W1 |
 | REQ-121 | W1 | not started | |
 | REQ-122 | W1 | not started | |
