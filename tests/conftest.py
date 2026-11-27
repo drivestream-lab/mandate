@@ -2,7 +2,8 @@
 
 A requirement counts as built when its row in docs/specification/as-built/requirements.md is
 marked implemented, unit-tested or live-verified. Each needs at least one test, anywhere under
-tests/, carrying @pytest.mark.req("REQ-nn"); the markers are read statically, so journeys count
+tests/, carrying @pytest.mark.req("REQ-nn") on a test function or Test class, or in pytestmark,
+in a file pytest collects (python_files); the markers are read statically, so journeys count
 without being run. The check runs only with --require-req-coverage, which `make test` passes.
 A missing table, or a row whose status is blank or unknown, fails the run too.
 """
@@ -36,7 +37,9 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     try:
         missing = requirements_without_test(
             table.read_text(encoding="utf-8"),
-            requirements_with_marker(config.rootpath / _TESTS_ROOT),
+            requirements_with_marker(
+                config.rootpath / _TESTS_ROOT, tuple(config.getini("python_files"))
+            ),
         )
     except ValueError as error:
         raise pytest.UsageError(f"requirement coverage check: {error}") from error

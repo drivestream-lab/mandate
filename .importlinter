@@ -22,17 +22,32 @@ layers =
 [importlinter:contract:engine-no-io]
 name = engine imports no IO layer
 type = forbidden
+# Direct and indirect: engine may not reach these through src.models or any other module.
 source_modules =
     src.engine
 forbidden_modules =
     src.api
+    src.app
     src.business_services
-    src.database
-    src.infra_services
-    src.di
-    src.configs
     src.common
+    src.configs
+    src.context_main
+    src.database
+    src.di
+    src.infra_services
+    src.main
     src.utils
+    src.worker_main
+
+[importlinter:contract:engine-no-io-packages]
+name = engine imports no IO package
+type = forbidden
+# Direct and indirect. temporalio's own internal imports are ignored, because
+# temporalio.workflow (which engine.workflows may use) reaches temporalio.client inside the
+# package; what is checked is engine, or a src module engine imports, importing them.
+source_modules =
+    src.engine
+forbidden_modules =
     httpx
     sqlalchemy
     asyncpg
@@ -42,9 +57,11 @@ forbidden_modules =
     temporalio.client
     temporalio.worker
     temporalio.activity
-# Direct imports only: temporalio.workflow (allowed here) itself reaches other temporalio
-# modules, which is not the engine importing them.
-allow_indirect_imports = True
+    temporalio.service
+    temporalio.testing
+    temporalio.bridge
+ignore_imports =
+    temporalio.** -> temporalio.**
 
 [importlinter:contract:workflow-import-boundary]
 name = Only engine.workflows imports temporalio.workflow
@@ -57,6 +74,7 @@ forbidden_modules =
 # internally, and worker_main and the infra client are meant to use them.
 allow_indirect_imports = True
 ignore_imports =
+    src.engine.workflows -> temporalio.workflow
     src.engine.workflows.** -> temporalio.workflow
 # No workflow exists yet, so the ignore has nothing to match until the first one lands.
 unmatched_ignore_imports_alerting = none

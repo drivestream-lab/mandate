@@ -49,3 +49,67 @@ def test_marker_in_any_test_directory_counts(tmp_path: Path) -> None:
     )
     assert requirements_with_marker(tmp_path) == {"REQ-02", "REQ-04"}
     assert requirements_without_test(_TABLE, requirements_with_marker(tmp_path)) == ["REQ-03"]
+
+
+def _write(root: Path, relative: str, text: str) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_markers_that_are_not_on_collected_tests_do_not_count(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "_helpers/test_helper.py",
+        'import pytest\n\n\ndef _helper() -> None:\n    pytest.mark.req("REQ-01")\n',
+    )
+    _write(
+        tmp_path,
+        "verify/test_verify.py",
+        'import pytest\n\n\n@pytest.mark.req("REQ-02")\ndef check_something() -> None: ...\n',
+    )
+    _write(
+        tmp_path,
+        "unit/notes_stray.py",
+        'import pytest\n\nif False:\n    _ = pytest.mark.req("REQ-03")\n\n\n'
+        '@pytest.mark.req("REQ-03")\ndef test_not_collected() -> None: ...\n',
+    )
+    _write(
+        tmp_path,
+        "unit/test_nested.py",
+        'import pytest\n\nif False:\n    pytestmark = pytest.mark.req("REQ-04")\n',
+    )
+    assert requirements_with_marker(tmp_path) == set()
+
+
+def test_markers_on_collected_tests_count(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "journeys/test_x.py",
+        'import pytest\n\n\n@pytest.mark.req("REQ-01")\nasync def test_flow() -> None: ...\n',
+    )
+    _write(
+        tmp_path,
+        "unit/flow_test.py",
+        'import pytest\n\n\n@pytest.mark.req("REQ-02")\nclass TestFlow:\n'
+        "    def test_it(self) -> None: ...\n",
+    )
+    _write(
+        tmp_path,
+        "unit/test_marks.py",
+        'import pytest\n\npytestmark = [pytest.mark.req("REQ-03"), pytest.mark.slow]\n',
+    )
+    assert requirements_with_marker(tmp_path) == {"REQ-01", "REQ-02", "REQ-03"}
+
+
+def test_requirement_row_spacing_does_not_hide_a_row() -> None:
+    for line in ("|REQ-120 |W1|implemented||", " | REQ-120 | W1 | implemented | |"):
+        assert built_requirements(line) == ["REQ-120"]
+
+
+def test_row_that_mentions_a_requirement_but_cannot_be_parsed_fails() -> None:
+    for line in ("| REQ-120a | W1 | implemented | |", "| see REQ-120 | W1 | implemented | |"):
+        with pytest.raises(ValueError, match="unparseable"):
+            built_requirements(line)
+    with pytest.raises(ValueError, match="REQ-120"):
+        built_requirements("|REQ-120 |")
