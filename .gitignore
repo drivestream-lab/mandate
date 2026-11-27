@@ -1,0 +1,14 @@
+# launchpad harness — skill symlinks (apply-harness)
+# Re-run: launchpad apply-harness --apply
+# Use /* not /*/ — git treats skill mirrors as symlinks, not directories.
+.harness/skills/
+.agents/skills/*
+!prayog-skills/
+.claude/skills/*
+.cursor/skills/
+
+# Local build output
+.venv/
+__pycache__/
+logs/
+.env
