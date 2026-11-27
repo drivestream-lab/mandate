@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from src.models.kernel_models import VersionStamp
+from src.models.role_output_models import DecidingRoleCall
 
 _NON_BLANK = r"\S"
 _HEX_SHA256 = r"^[0-9a-f]{64}$"
@@ -21,6 +22,8 @@ class LedgerEntryType(StrEnum):
 
     DECISION = "decision"
     CORRECTION = "correction"
+    SEALED_CALL = "sealed_call"
+    CALL_REVEAL = "call_reveal"
 
 
 class RungType(StrEnum):
@@ -102,6 +105,43 @@ class DecisionRecord(BaseModel):
         if self.choice not in offered:
             raise ValueError("the choice is not one of the options offered")
         return self
+
+
+class SealedCallRecord(BaseModel):
+    """A gate's deciding-role call, sealed before the gate's brief is posted.
+
+    The call and its nonce are kept beside the digest, so the call survives a restart and can
+    be revealed from the ledger alone. They are never put on the pull request. A gate that got
+    no valid call records that (no digest, call or nonce), so the absence is on the ledger too.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    gate_id: UUID = Field(description="The gate the call was made for")
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$", description="The head commit the call read")
+    call_digest: str | None = Field(
+        pattern=_HEX_SHA256, description="Digest of the call and its nonce; None when no call"
+    )
+    call: DecidingRoleCall | None = Field(description="The sealed call; None when there was none")
+    nonce: str | None = Field(description="The nonce in the digest; None when there was no call")
+
+    @model_validator(mode="after")
+    def _call_digest_and_nonce_go_together(self) -> "SealedCallRecord":
+        present = [self.call is not None, self.nonce is not None, self.call_digest is not None]
+        if any(present) and not all(present):
+            raise ValueError("a sealed call needs its call, nonce and digest together")
+        return self
+
+
+class CallRevealRecord(BaseModel):
+    """The sealed call, shown once the holder's signoff is recorded."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    gate_id: UUID = Field(description="The gate the call was made for")
+    sealed_entry_hash: str = Field(pattern=_HEX_SHA256, description="Hash of the sealing entry")
+    call: DecidingRoleCall = Field(description="The call that was sealed")
+    nonce: str = Field(min_length=16, description="The nonce that went into the digest")
 
 
 class CorrectionRecord(BaseModel):

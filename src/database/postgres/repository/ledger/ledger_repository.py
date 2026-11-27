@@ -78,6 +78,22 @@ class LedgerRepository:
         row = result.first()
         return None if row is None else _to_stored(row)
 
+    async def find_by_type_and_gate(
+        self, session: AsyncSession, entry_type: str, gate_id: UUID
+    ) -> StoredLedgerEntry | None:
+        """The first entry of this type whose content names this gate, or None."""
+        result = await session.execute(
+            select(_ENTRIES)
+            .where(
+                _ENTRIES.c.entry_type == entry_type,
+                _ENTRIES.c.payload["content"]["gate_id"].astext == str(gate_id),
+            )
+            .order_by(_ENTRIES.c.sequence)
+            .limit(1)
+        )
+        row = result.first()
+        return None if row is None else _to_stored(row)
+
     async def read_all(self, session: AsyncSession) -> list[StoredLedgerEntry]:
         """Every entry in sequence order."""
         result = await session.execute(select(_ENTRIES).order_by(_ENTRIES.c.sequence))
