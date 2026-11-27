@@ -5,6 +5,10 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+_NON_BLANK = r"\S"
+"""Pattern for a string part: at least one non-space character, so a blank part is rejected."""
+
+
 class StampFieldType(StrEnum):
     """The parts of a version stamp, as named when two stamps are compared."""
 
@@ -22,8 +26,14 @@ class NamedVersion(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str = Field(min_length=1, description="What is versioned, such as a block or skill name")
-    version: str = Field(min_length=1, description="Its version or content digest")
+    name: str = Field(
+        min_length=1,
+        pattern=_NON_BLANK,
+        description="What is versioned, such as a block or skill name",
+    )
+    version: str = Field(
+        min_length=1, pattern=_NON_BLANK, description="Its version or content digest"
+    )
 
 
 class VersionStamp(BaseModel):
@@ -34,13 +44,15 @@ class VersionStamp(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract: str = Field(min_length=1, description="Contract version")
+    contract: str = Field(min_length=1, pattern=_NON_BLANK, description="Contract version")
     block_versions: tuple[NamedVersion, ...] = Field(description="Building block versions")
     skills: tuple[NamedVersion, ...] = Field(description="Skill versions")
-    rules: str = Field(min_length=1, description="Rules version")
-    agent_setup: str = Field(min_length=1, description="Agent setup version or digest")
-    policy_revision: str = Field(min_length=1, description="Policy revision")
-    mandate_release: str = Field(min_length=1, description="Mandate release")
+    rules: str = Field(min_length=1, pattern=_NON_BLANK, description="Rules version")
+    agent_setup: str = Field(
+        min_length=1, pattern=_NON_BLANK, description="Agent setup version or digest"
+    )
+    policy_revision: str = Field(min_length=1, pattern=_NON_BLANK, description="Policy revision")
+    mandate_release: str = Field(min_length=1, pattern=_NON_BLANK, description="Mandate release")
 
     @field_validator("block_versions", "skills")
     @classmethod

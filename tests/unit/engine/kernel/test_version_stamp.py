@@ -43,9 +43,18 @@ def test_a_missing_part_is_rejected(field: str) -> None:
 @pytest.mark.parametrize(
     "field", ["contract", "rules", "agent_setup", "policy_revision", "mandate_release"]
 )
-def test_an_empty_part_is_rejected(field: str) -> None:
+@pytest.mark.parametrize("blank", ["", " ", "\t", " \t\n"])
+def test_an_empty_part_is_rejected(field: str, blank: str) -> None:
     with pytest.raises(ValidationError):
-        _stamp(**{field: ""})
+        _stamp(**{field: blank})
+
+
+@pytest.mark.parametrize("blank", ["", " ", "\t"])
+def test_a_blank_block_or_skill_name_or_version_is_rejected(blank: str) -> None:
+    with pytest.raises(ValidationError):
+        NamedVersion(name=blank, version="1")
+    with pytest.raises(ValidationError):
+        NamedVersion(name="a", version=blank)
 
 
 def test_a_repeated_block_name_is_rejected() -> None:

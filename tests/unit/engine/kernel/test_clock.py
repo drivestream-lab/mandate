@@ -31,20 +31,40 @@ class _Fixed:
 
 
 def _clock_reads(source: str) -> list[str]:
-    """Name every system clock read or clock-module import in the source."""
+    """Name every system clock read or clock-module import, resolving import aliases."""
+    tree = ast.parse(source)
+    names: dict[str, str] = {}  # local name -> what it stands for ("datetime", "time.time", ...)
     found: list[str] = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            owner = node.func.value
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("datetime", "time"):
+            for alias in node.names:
+                names[alias.asname or alias.name] = (
+                    alias.name if node.module == "datetime" else f"time.{alias.name}"
+                )
+            if node.module == "time":
+                found.append("from time import")
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("datetime", "time"):
+                    names[alias.asname or alias.name] = alias.name
+                if alias.name == "time":
+                    found.append("import time")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            owner = func.value
             owner_name = (
                 owner.attr if isinstance(owner, ast.Attribute) else getattr(owner, "id", "")
             )
-            if (owner_name, node.func.attr) in _CLOCK_CALLS:
-                found.append(f"{owner_name}.{node.func.attr}")
-        if isinstance(node, ast.ImportFrom) and node.module == "time":
-            found.append("from time import")
-        if isinstance(node, ast.Import) and any(alias.name == "time" for alias in node.names):
-            found.append("import time")
+            owner_name = names.get(owner_name, owner_name)
+            if (owner_name, func.attr) in _CLOCK_CALLS:
+                found.append(f"{owner_name}.{func.attr}")
+        elif isinstance(func, ast.Name):
+            target = names.get(func.id, "")
+            if tuple(target.split(".", 1)) in _CLOCK_CALLS:
+                found.append(target)
     return found
 
 
@@ -62,6 +82,21 @@ def test_the_scan_catches_a_clock_read() -> None:
     assert _clock_reads("from datetime import datetime\nx = datetime.now()\n") == ["datetime.now"]
     assert _clock_reads("import time\nx = time.time()\n") == ["import time", "time.time"]
     assert _clock_reads("import datetime\nx = datetime.datetime.utcnow()\n") == ["datetime.utcnow"]
+
+
+def test_the_scan_catches_aliased_imports() -> None:
+    assert _clock_reads("from datetime import datetime as dt\nx = dt.now()\n") == ["datetime.now"]
+    assert _clock_reads("from datetime import date as d\nx = d.today()\n") == ["date.today"]
+    assert _clock_reads("import time as t\nx = t.time()\n") == ["import time", "time.time"]
+    assert _clock_reads("from time import time as now\nx = now()\n") == [
+        "from time import",
+        "time.time",
+    ]
+    assert _clock_reads("from time import monotonic as m\nx = m()\n") == [
+        "from time import",
+        "time.monotonic",
+    ]
+    assert _clock_reads("import datetime as m\nx = m.datetime.utcnow()\n") == ["datetime.utcnow"]
 
 
 def test_an_injected_clock_supplies_the_time() -> None:
