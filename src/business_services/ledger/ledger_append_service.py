@@ -33,10 +33,12 @@ from src.models.ledger_models import (
     GENESIS_HASH,
     ChainAnchor,
     ChainVerification,
+    CallRevealRecord,
     CorrectionRecord,
     DecisionRecord,
     LedgerEntryDraft,
     LedgerEntryType,
+    SealedCallRecord,
     StoredLedgerEntry,
 )
 
@@ -144,6 +146,33 @@ class LedgerAppendService(BaseBusinessService):
         return await self._append_in(
             session, build_correction_draft(record, stamp, uuid4()), record.corrects_entry_hash
         )
+
+    async def append_sealed_call_in(
+        self, session: AsyncSession, record: SealedCallRecord, stamp: VersionStamp
+    ) -> StoredLedgerEntry:
+        """Record a sealed call in the caller's transaction; it commits or rolls back with it.
+
+        A LedgerHeadOrphanError leaves the caller's transaction to roll back: never commit it.
+        """
+        draft = LedgerEntryDraft(
+            entry_id=uuid4(),
+            entry_type=LedgerEntryType.SEALED_CALL,
+            payload=record.model_dump(mode="json"),
+            version_stamp=stamp,
+        )
+        return await self._append_in(session, draft, None)
+
+    async def append_call_reveal_in(
+        self, session: AsyncSession, record: CallRevealRecord, stamp: VersionStamp
+    ) -> StoredLedgerEntry:
+        """Record the reveal of a sealed call in the caller's transaction."""
+        draft = LedgerEntryDraft(
+            entry_id=uuid4(),
+            entry_type=LedgerEntryType.CALL_REVEAL,
+            payload=record.model_dump(mode="json"),
+            version_stamp=stamp,
+        )
+        return await self._append_in(session, draft, None)
 
     async def verify(self, anchor: ChainAnchor | None = None) -> ChainVerification:
         """Read the whole chain and check it, against the anchor when one is given."""
