@@ -1,4 +1,4 @@
-.PHONY: setup check check-ci format format-check lint lint-check types layers test run deploy deploy-down verify swarm swarm-once swarm-stop
+.PHONY: setup check check-ci format format-check lint lint-check types layers test run deploy deploy-down verify
 
 setup:
 	@bash scripts/setup_dev.sh
@@ -62,16 +62,3 @@ deploy-down:
 verify:
 	python3 tests/verify/verify_health.py
 
-# The build swarm (PL-16 BP-7): one headless Claude Code lead per round, until stopped.
-# Stateless: a restart resumes from repo state. See CLAUDE.md "The lead".
-SWARM_DIR ?= $(HOME)/.mandate/swarm
-
-swarm:
-	@bash scripts/swarm/run_swarm.sh
-
-swarm-once:
-	@SWARM_ONCE=1 bash scripts/swarm/run_swarm.sh
-
-swarm-stop:
-	@mkdir -p "$(SWARM_DIR)" && touch "$(SWARM_DIR)/STOP"
-	@echo "the swarm stops after its current round"

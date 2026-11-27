@@ -15,7 +15,7 @@ Never edit `.cursor/rules/` or `prayog-skills/` here. Rule changes go upstream a
 
 ## Build mode: Mandate is built by a Claude Code swarm
 
-Until Mandate governs its own development (programme two), this repo is built by a Claude Code swarm (engineering-ready PRD PL-16, REQ-120): a stateless lead per round, builder subagents in their own worktrees, and challengers on a different model. That replaces the prayog wave workflow described in `AGENTS.md`:
+Until Mandate governs its own development (programme two), this repo is built by a Claude Code swarm (engineering-ready PRD PL-16, REQ-120): a lead session working the implementation plan with KD, builder subagents in their own worktrees, and challengers on a different model. That replaces the prayog wave workflow described in `AGENTS.md`:
 
 | `AGENTS.md` (prayog v2) says | Here, instead |
 | --- | --- |
@@ -55,9 +55,9 @@ The prayog content skills (`/spec-draft`, `/loop-spec` and the like) are not use
 
 Ask KD in the PR or the chat. Do not guess intent from code that is not there yet.
 
-## The lead: one round of the swarm
+## The lead: how a task moves
 
-`make swarm` starts one headless lead per round (`scripts/swarm/run_swarm.sh`, prompt `scripts/swarm/lead_round.md`). The lead never writes code and never merges by judgement: it reads state, starts subagents, runs `scripts/swarm/merge_task.sh`, and records the round. An interactive session acting as lead follows the same rules.
+The lead is a Claude Code session working the implementation plan wave by wave, with KD's inputs. It never writes code and never merges by judgement: it reads state, starts subagents, runs `scripts/swarm/merge_task.sh`, and records what happened. It rebuilds its state from the repos and GitHub every time it starts or resumes, never from memory.
 
 ### Identities
 
@@ -70,7 +70,7 @@ Ask KD in the PR or the chat. Do not guess intent from code that is not there ye
 
 `GITHUB_TOKEN` on the lab machine is KD's own token. Never run plain `gh` or `git push`; `as_role.sh` removes it and mints the role's App token (`scripts/swarm/app_token.sh`, git credential helper `scripts/swarm/git-credential-mandate-app`). Each role reads only its own App's folder.
 
-### Each round
+### The steps
 
 1. **Rebuild state** from the repos and GitHub, never from memory: the WorkManifest (`mandate-meta` plan section 9), `docs/specification/as-built/requirements.md`, open and merged PRs on `mandate` and `mandate-control-tower` with their statuses and reviews, open `develop-red` issues, and the pinned build-log issue.
 2. **Red develop first.** While a runner-opened `develop-red` issue is open, only its fix merges. Start the `verifier` on the issue, then a builder on the fix (`Fixes #N` in the body). The fix needs `Challenger: first` and a separate `Challenger: second` on its head; then it merges like any task.
@@ -87,28 +87,28 @@ Ask KD in the PR or the chat. Do not guess intent from code that is not there ye
    - the `verifier` in wave mode checks the lab deploy of the develop head (the runner's develop run, `lab-mandate`'s tables and logs) against every exit criterion of the wave, and posts the evidence;
    - when it holds, `mandate-builder` adds `wave-accepted` and marks the PR ready, and the verifier posts the signoff as `mandate-challenger`: an Approve whose body has `Signoff: wave`, `Initiative: INIT-MANDATE-001` and `Head: <full head sha>`, and no challenger marker;
    - when the runner is green on that head, `merge_task.sh` merges it. The next wave starts only once `main` has moved.
-8. **Record the round** as one comment on the build-log issue (below), then exit.
+8. **Record** each merge, failure and stop as one comment on the build-log issue (below).
 
 ### Stop and wait for KD, only when
 
 - the spec is unclear or contradicts itself, or a decision is not covered by the PRDs: post the question with options and a recommendation, never choose silently;
 - a task failed three rounds;
 - something needs KD on GitHub, Paperclip or the lab machine (rulesets, App settings, secrets, the lab env file);
-- spend reaches 80% of the wave's cap ($1,000 per wave): sum the round spends recorded in the build log since the wave started.
+- spend reaches 80% of the wave's cap ($1,000 per wave): the session's reported cost since the wave started.
 
-To stop: write the build-log entry with a `Waiting on KD` section giving the exact command or click needed, mentioning KD, and exit. Work that does not depend on the answer carries on in later rounds; the next round sees KD's action on GitHub and continues from there.
+To stop: write the build-log entry with a `Waiting on KD` section giving the exact command or click needed, and ask KD in the session. Work that does not depend on the answer carries on; when KD has acted, the lead continues from repo state.
 
 ### The build log
 
-One pinned issue on `drivestream-lab/mandate`, titled `Build log: INIT-MANDATE-001`, labelled `build-log`, opened and written by `mandate-builder`. If it does not exist, the lead opens and pins it. Each round appends one comment:
+One pinned issue on `drivestream-lab/mandate`, titled `Build log: INIT-MANDATE-001`, labelled `build-log`, opened and written by `mandate-builder`. If it does not exist, the lead opens and pins it (template `.github/ISSUE_TEMPLATE/build-log.md`). Each entry is one comment:
 
 ```
-Round <SWARM_ROUND_ID> (wave W<n>)
+<date and time, UTC> (wave W<n>)
 Started: <task ids and PRs>
 Merged: <PRs and merge shas>
-Failed: <PRs, rule or command, round count>
+Failed: <PRs, rule or command, fix round count>
 Waiting on KD: <none, or each item with the exact command or click>
-Spend: last completed round $<x>; wave W<n> so far $<y> of $1,000
+Spend: wave W<n> so far $<y> of $1,000
 ```
 
-No secrets, no em dashes. Spend per completed round is in `~/.mandate/swarm/spend.tsv` (round id, USD, exit code), written by `make swarm` after each round exits. Wave spend is the sum of its rows from the wave's first round (named in the build log) onward.
+No secrets, no em dashes. Spend is the session's reported cost since the wave started. Labels the flow uses (`build-log`, `wave-accepted`, `develop-red`) are created by `scripts/swarm/labels.sh`.
