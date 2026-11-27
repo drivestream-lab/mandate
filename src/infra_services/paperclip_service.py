@@ -13,6 +13,7 @@ Rules this client keeps:
 import uuid
 
 import httpx
+from injector import NoInject, inject
 from pydantic import BaseModel, TypeAdapter
 
 from src.configs.paperclip_settings import PINNED_PAPERCLIP_COMMIT, PaperclipSettings
@@ -26,16 +27,24 @@ from src.models.paperclip_models import (
     IssueRequest,
     HealthStatusType,
     InteractionKindType,
+    InteractionPermissions,
     NewIssue,
+    NewProject,
     NewQuestion,
+    PaperclipAgent,
     PaperclipComment,
     PaperclipHealth,
     PaperclipIssue,
+    PaperclipProject,
     PaperclipQuestion,
     PaperclipRun,
     QuestionPayload,
+    ProjectRequest,
     QuestionRequest,
     QuestionSpec,
+    SkillDecision,
+    SkillPolicy,
+    SkillEvaluationRequest,
     WakeupRequest,
 )
 
@@ -88,22 +97,30 @@ def _comment_request_id(key: IdempotencyKey) -> str:
 _JSON = {"Content-Type": "application/json"}
 _COMMENTS = TypeAdapter(list[PaperclipComment])
 _CARDS = TypeAdapter(list[dict[str, object]])
+_PROJECTS = TypeAdapter(list[PaperclipProject])
+_AGENTS = TypeAdapter(list[PaperclipAgent])
 
 
 class PaperclipService(BaseInfraService):
     """Talks to Paperclip as Mandate's own agent, only inside its own runs."""
 
+    @inject
     def __init__(
         self,
-        settings: PaperclipSettings | None = None,
+        settings: NoInject[PaperclipSettings | None] = None,
         *,
-        pinned_commit: str = PINNED_PAPERCLIP_COMMIT,
+        pinned_commit: NoInject[str] = PINNED_PAPERCLIP_COMMIT,
     ) -> None:
         """`pinned_commit` is for tests that need another pin; it is never read from configuration."""
         self._settings = settings if settings is not None else PaperclipSettings.get_instance()
         self._pinned_commit = pinned_commit
         self._client: httpx.AsyncClient | None = None
         self._opened_runs: set[str] = set()
+
+    @property
+    def agent_id(self) -> str:
+        """Mandate's own agent."""
+        return self._settings.agent_id
 
     async def initialize(self) -> None:
         """Read the agent token, open the connection and refuse an unrecognised release."""
@@ -206,6 +223,48 @@ class PaperclipService(BaseInfraService):
         response = await self._write(run, path, key, body)
         return self._parse(PaperclipQuestion, response, path)
 
+    async def create_project(
+        self, run: PaperclipRun, work_item_id: str, step: str, project: NewProject
+    ) -> PaperclipProject:
+        """Create a project in Mandate's company."""
+        key = derive_idempotency_key(work_item_id, f"{step}:project")
+        body = ProjectRequest(name=project.name, description=project.description)
+        path = f"/api/companies/{self._settings.company_id}/projects"
+        response = await self._write(run, path, key, body)
+        return self._parse(PaperclipProject, response, path)
+
+    async def list_projects(self) -> list[PaperclipProject]:
+        path = f"/api/companies/{self._settings.company_id}/projects"
+        return self._parse_list(_PROJECTS, await self._read(path), path)
+
+    async def list_agents(self) -> list[PaperclipAgent]:
+        path = f"/api/companies/{self._settings.company_id}/agents"
+        return self._parse_list(_AGENTS, await self._read(path), path)
+
+    async def get_agent(self, agent_id: str) -> PaperclipAgent:
+        path = f"/api/agents/{agent_id}"
+        return self._parse(PaperclipAgent, await self._read(path), path)
+
+    async def get_interaction_permissions(self, agent_id: str) -> InteractionPermissions:
+        path = f"/api/agents/{agent_id}/interaction-permissions"
+        return self._parse(InteractionPermissions, await self._read(path), path)
+
+    async def get_own_agent(self) -> PaperclipAgent:
+        """The agent the token belongs to, as Paperclip sees it."""
+        return await self.get_agent("me")
+
+    async def get_skill_policy(self) -> SkillPolicy:
+        path = f"/api/companies/{self._settings.company_id}/skill-policy"
+        return self._parse(SkillPolicy, await self._read(path), path)
+
+    async def evaluate_skill_action(self, action: str) -> SkillDecision:
+        """Ask Paperclip whether Mandate's agent may take this skill action; it decides, not Mandate."""
+        path = f"/api/companies/{self._settings.company_id}/skill-policy/evaluate"
+        body = SkillEvaluationRequest(action=action)
+        response = await self._ready().post(path, content=body.to_json(), headers=_JSON)
+        self._raise_for_status(response, path)
+        return self._parse(SkillDecision, response, path)
+
     async def get_issue(self, issue_id: str) -> PaperclipIssue:
         path = f"/api/issues/{issue_id}"
         return self._parse(PaperclipIssue, await self._read(path), path)
@@ -276,5 +335,14 @@ class PaperclipService(BaseInfraService):
     def _parse[M: BaseModel](model: type[M], response: httpx.Response, path: str) -> M:
         try:
             return model.model_validate_json(response.content)
+        except ValueError as error:
+            raise PaperclipError(f"unexpected answer from Paperclip for {path}") from error
+
+    @staticmethod
+    def _parse_list[T](
+        adapter: TypeAdapter[list[T]], response: httpx.Response, path: str
+    ) -> list[T]:
+        try:
+            return adapter.validate_json(response.content)
         except ValueError as error:
             raise PaperclipError(f"unexpected answer from Paperclip for {path}") from error

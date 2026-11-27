@@ -168,6 +168,79 @@ class PaperclipQuestion(_PaperclipRecord):
     result: QuestionResult | None = None
 
 
+class AgentPermissions(_PaperclipRecord):
+    """The permission flags on an agent record; they do not deny interactions or skills."""
+
+    can_create_agents: bool = False
+
+
+class PaperclipAgent(_PaperclipRecord):
+    """An agent as Paperclip holds it."""
+
+    id: str
+    name: str
+    status: str
+    role: str
+    lifecycle_state: str
+    permissions: AgentPermissions = AgentPermissions()
+
+
+class EffectiveInteractions(_PaperclipRecord):
+    """What an agent may do to other agents' work once overrides are applied."""
+
+    can_assign_tasks_to_agents: bool
+    can_configure_other_agents: bool
+
+
+class InteractionPermissions(_PaperclipRecord):
+    """An agent's interaction permissions."""
+
+    effective: EffectiveInteractions
+
+
+class SkillPolicySubject(_PaperclipRecord):
+    """Whom a skill-policy rule applies to."""
+
+    type: str
+    agent_ids: tuple[str, ...] = ()
+    roles: tuple[str, ...] = ()
+
+
+class SkillPolicyRule(_PaperclipRecord):
+    """One rule of the company skill policy."""
+
+    id: str
+    priority: int = 0
+    effect: str
+    subject: SkillPolicySubject
+    actions: tuple[str, ...] = ()
+    resources: dict[str, object] | None = None
+
+
+class SkillPolicy(_PaperclipRecord):
+    """The company skill policy."""
+
+    default_effect: str
+    materialized: bool = True
+    rules: tuple[SkillPolicyRule, ...] = ()
+
+
+class SkillDecision(_PaperclipRecord):
+    """Paperclip's own answer on whether the calling agent may take a skill action."""
+
+    allowed: bool
+    action: str
+    reason: str
+
+
+class PaperclipProject(_PaperclipRecord):
+    """A project as Paperclip holds it."""
+
+    id: str
+    name: str
+    description: str | None = None
+
+
 class QuestionOption(BaseModel):
     """One option of a question."""
 
@@ -261,3 +334,25 @@ class QuestionRequest(PaperclipRequest):
     idempotency_key: str
     payload: QuestionPayload
     addressee_user_id: str | None = None
+
+
+class NewProject(BaseModel):
+    """A project Mandate creates for a programme."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    description: str = ""
+
+
+class ProjectRequest(PaperclipRequest):
+    """Create a project."""
+
+    name: str
+    description: str
+
+
+class SkillEvaluationRequest(PaperclipRequest):
+    """Ask Paperclip whether the calling agent may take a skill action."""
+
+    action: str
