@@ -1,0 +1,262 @@
+"""Mandate's client for Paperclip: every write happens inside a run Mandate woke on its own agent.
+
+Rules this client keeps:
+- It checks Paperclip's build commit (GET /api/health) against the one pinned release before it
+  starts, and again before each run. An unreadable or different release stops all work; there is
+  no default to fall back to.
+- A write takes a PaperclipRun that this client opened with POST /api/agents/:id/wakeup. It sends
+  the run's id as X-Paperclip-Run-Id and an idempotency key derived from the work item and the
+  step. A run this client did not open is refused before anything is sent.
+- It has no call that assigns work, creates agents or creates skills.
+"""
+
+import uuid
+
+import httpx
+from pydantic import BaseModel, TypeAdapter
+
+from src.configs.paperclip_settings import PaperclipSettings
+from src.engine.kernel.idempotency_key import derive_idempotency_key
+from src.infra_services.base_infra_service import BaseInfraService
+from src.logging import get_logger
+from src.models.kernel_models import IdempotencyKey
+from src.models.paperclip_models import (
+    NewIssue,
+    NewQuestion,
+    PaperclipComment,
+    PaperclipHealth,
+    PaperclipIssue,
+    PaperclipQuestion,
+    PaperclipRun,
+)
+
+logger = get_logger()
+
+_MAX_ERROR_TEXT = 300
+
+
+class PaperclipError(Exception):
+    """Base for every refusal or failure of the Paperclip client."""
+
+
+class UnrecognisedReleaseError(PaperclipError):
+    """Paperclip's release is not the pinned one, or could not be read: Mandate stops."""
+
+
+class WriteOutsideRunError(PaperclipError):
+    """A write was attempted with a run this client did not open."""
+
+
+class PaperclipRequestError(PaperclipError):
+    """Paperclip answered a request with an error status."""
+
+    def __init__(self, status_code: int, path: str, detail: str) -> None:
+        super().__init__(f"Paperclip answered {status_code} for {path}: {detail}")
+        self.status_code = status_code
+        self.path = path
+
+
+def check_release(health: PaperclipHealth, pinned_commit: str) -> None:
+    """Accept only a health report whose commit equals the pinned one, exactly.
+
+    A missing commit, an abbreviated one or a different one is a stop.
+    """
+    if not health.commit:
+        raise UnrecognisedReleaseError("Paperclip did not report its build commit")
+    if health.commit != pinned_commit:
+        raise UnrecognisedReleaseError(
+            f"Paperclip build {health.commit} is not the pinned release {pinned_commit}"
+        )
+
+
+def _comment_request_id(key: IdempotencyKey) -> str:
+    """A UUID derived from the key: Paperclip's per-comment request id, so a repeat is one comment."""
+    return str(uuid.UUID(hex=key.value[:32], version=4))
+
+
+_COMMENTS = TypeAdapter(list[PaperclipComment])
+_QUESTIONS = TypeAdapter(list[PaperclipQuestion])
+
+
+class PaperclipService(BaseInfraService):
+    """Talks to Paperclip as Mandate's own agent, only inside its own runs."""
+
+    def __init__(self, settings: PaperclipSettings | None = None) -> None:
+        self._settings = settings if settings is not None else PaperclipSettings.get_instance()
+        self._client: httpx.AsyncClient | None = None
+        self._opened_runs: set[str] = set()
+
+    async def initialize(self) -> None:
+        """Read the agent token, open the connection and refuse an unrecognised release."""
+        if self._client is not None:
+            return
+        token = self._settings.token_file.read_text(encoding="utf-8").strip()
+        client = httpx.AsyncClient(
+            base_url=self._settings.base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._settings.request_timeout_seconds,
+        )
+        try:
+            await self._verify_release(client)
+        except BaseException:
+            await client.aclose()
+            raise
+        self._client = client
+        logger.info("Paperclip client ready on the pinned release")
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+        self._opened_runs.clear()
+
+    async def health_check(self) -> bool:
+        """True when Paperclip is reachable on the pinned release; never raises."""
+        try:
+            await self._verify_release(self._ready())
+        except (PaperclipError, httpx.HTTPError):
+            return False
+        return True
+
+    async def verify_release(self) -> None:
+        """Raise UnrecognisedReleaseError unless Paperclip runs the pinned release now."""
+        await self._verify_release(self._ready())
+
+    async def open_run(self, work_item_id: str, step: str) -> PaperclipRun:
+        """Wake Mandate's own agent for this step and return the run its writes belong to."""
+        client = self._ready()
+        await self._verify_release(client)
+        key = derive_idempotency_key(work_item_id, f"{step}:run")
+        path = f"/api/agents/{self._settings.agent_id}/wakeup"
+        response = await client.post(
+            path,
+            json={
+                "source": "on_demand",
+                "triggerDetail": "manual",
+                "reason": f"Mandate step {step}",
+                "idempotencyKey": key.value,
+            },
+            headers={"Idempotency-Key": key.value},
+        )
+        self._raise_for_status(response, path)
+        run = self._parse(PaperclipRun, response, path)
+        if run.agent_id != self._settings.agent_id:
+            raise PaperclipError("Paperclip returned a run for a different agent")
+        self._opened_runs.add(run.id)
+        return run
+
+    async def create_issue(
+        self, run: PaperclipRun, work_item_id: str, step: str, issue: NewIssue
+    ) -> PaperclipIssue:
+        """File an issue in Mandate's company (and project, when set), unassigned."""
+        key = derive_idempotency_key(work_item_id, f"{step}:issue")
+        body: dict[str, object] = {
+            "title": issue.title,
+            "description": issue.description,
+            "idempotencyKey": key.value,
+        }
+        if self._settings.project_id is not None:
+            body["projectId"] = self._settings.project_id
+        path = f"/api/companies/{self._settings.company_id}/issues"
+        response = await self._write(run, path, key, body)
+        return self._parse(PaperclipIssue, response, path)
+
+    async def post_comment(
+        self, run: PaperclipRun, work_item_id: str, step: str, issue_id: str, text: str
+    ) -> PaperclipComment:
+        """Add a comment to an issue."""
+        key = derive_idempotency_key(work_item_id, f"{step}:comment")
+        path = f"/api/issues/{issue_id}/comments"
+        response = await self._write(
+            run, path, key, {"body": text, "clientRequestId": _comment_request_id(key)}
+        )
+        return self._parse(PaperclipComment, response, path)
+
+    async def open_question(
+        self, run: PaperclipRun, work_item_id: str, step: str, issue_id: str, question: NewQuestion
+    ) -> PaperclipQuestion:
+        """Open a single-choice question on an issue that only a person can answer."""
+        key = derive_idempotency_key(work_item_id, f"{step}:question")
+        body: dict[str, object] = {
+            "kind": "ask_user_questions",
+            "continuationPolicy": "none",
+            "resolverPolicy": "human_only",
+            "idempotencyKey": key.value,
+            "payload": {
+                "version": 1,
+                "title": question.title,
+                "questions": [
+                    {
+                        "id": question.question_id,
+                        "prompt": question.prompt,
+                        "selectionMode": "single",
+                        "required": True,
+                        "options": [o.model_dump() for o in question.options],
+                    }
+                ],
+            },
+        }
+        if question.addressee_user_id is not None:
+            body["addresseeUserId"] = question.addressee_user_id
+        path = f"/api/issues/{issue_id}/interactions"
+        response = await self._write(run, path, key, body)
+        return self._parse(PaperclipQuestion, response, path)
+
+    async def get_issue(self, issue_id: str) -> PaperclipIssue:
+        path = f"/api/issues/{issue_id}"
+        return self._parse(PaperclipIssue, await self._read(path), path)
+
+    async def list_comments(self, issue_id: str) -> list[PaperclipComment]:
+        response = await self._read(f"/api/issues/{issue_id}/comments")
+        return _COMMENTS.validate_json(response.content)
+
+    async def list_questions(self, issue_id: str) -> list[PaperclipQuestion]:
+        response = await self._read(f"/api/issues/{issue_id}/interactions")
+        return _QUESTIONS.validate_json(response.content)
+
+    def _ready(self) -> httpx.AsyncClient:
+        if self._client is None:
+            raise PaperclipError("the Paperclip client is not initialised")
+        return self._client
+
+    async def _verify_release(self, client: httpx.AsyncClient) -> None:
+        try:
+            response = await client.get("/api/health")
+            response.raise_for_status()
+            health = PaperclipHealth.model_validate_json(response.content)
+        except (httpx.HTTPError, ValueError) as error:
+            raise UnrecognisedReleaseError(
+                f"Paperclip's release could not be read: {type(error).__name__}"
+            ) from error
+        check_release(health, self._settings.pinned_commit)
+
+    async def _write(
+        self, run: PaperclipRun, path: str, key: IdempotencyKey, body: dict[str, object]
+    ) -> httpx.Response:
+        if run.id not in self._opened_runs:
+            raise WriteOutsideRunError("writes are allowed only inside a run this client opened")
+        response = await self._ready().post(
+            path,
+            json=body,
+            headers={"X-Paperclip-Run-Id": run.id, "Idempotency-Key": key.value},
+        )
+        self._raise_for_status(response, path)
+        return response
+
+    async def _read(self, path: str) -> httpx.Response:
+        response = await self._ready().get(path)
+        self._raise_for_status(response, path)
+        return response
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response, path: str) -> None:
+        if response.is_success:
+            return
+        raise PaperclipRequestError(response.status_code, path, response.text[:_MAX_ERROR_TEXT])
+
+    @staticmethod
+    def _parse[M: BaseModel](model: type[M], response: httpx.Response, path: str) -> M:
+        try:
+            return model.model_validate_json(response.content)
+        except ValueError as error:
+            raise PaperclipError(f"unexpected answer from Paperclip for {path}") from error
