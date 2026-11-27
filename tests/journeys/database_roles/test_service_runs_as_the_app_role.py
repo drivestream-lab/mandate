@@ -13,6 +13,7 @@ from outside: the owner reads pg_stat_activity for the sessions the service name
 No endpoint reports it, so nothing about the session leaks through the service.
 """
 
+import json
 import os
 import subprocess
 import urllib.request
@@ -24,7 +25,7 @@ from sqlalchemy.engine import URL, Connection
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 SERVICE_APPLICATION_NAME = "mandate"
-OWNER_KEYS = ("POSTGRES_MIGRATION_USER", "POSTGRES_MIGRATION_PASSWORD")
+OWNER_KEYS = ("POSTGRES_MIGRATION_USER", "POSTGRES_MIGRATION_PASSWORD_FILE")
 
 
 def _setting(name: str) -> str:
@@ -127,8 +128,9 @@ def test_the_running_service_does_not_hold_the_owner_credentials(container: str)
     app_password = _setting("MANDATE_DB_APP_PASSWORD")
     assert owner_password != app_password, "the owner and app passwords must differ"
 
-    # The entrypoint execs the service, so it is process 1 and its environment is the service's.
-    environ = _docker("exec", container, "cat", "/proc/1/environ")
+    # The entrypoint execs the service as the app user, so it is process 1 and its environment is
+    # the service's; only that user may read it (root in the container may not).
+    environ = _docker("exec", "-u", "app", container, "cat", "/proc/1/environ")
     assert environ.returncode == 0, environ.stderr
     entries = [entry for entry in environ.stdout.split("\0") if entry]
     pairs = dict(entry.split("=", 1) for entry in entries if "=" in entry)
@@ -136,8 +138,43 @@ def test_the_running_service_does_not_hold_the_owner_credentials(container: str)
     assert pairs.get("POSTGRES_USER") == "mandate_app"
     assert not [key for key in OWNER_KEYS if key in pairs]
     assert owner_password not in pairs.values()
-    command = _docker("exec", container, "cat", "/proc/1/cmdline").stdout
+    command = _docker("exec", "-u", "app", container, "cat", "/proc/1/cmdline").stdout
     assert "src.main" in command
+
+
+@pytest.mark.req("REQ-55")
+def test_no_password_value_is_in_the_container_environment(container: str) -> None:
+    passwords = [_setting("MANDATE_DB_OWNER_PASSWORD"), _setting("MANDATE_DB_APP_PASSWORD")]
+
+    inspected = _docker("inspect", "-f", "{{json .Config.Env}}", container)
+    assert inspected.returncode == 0, inspected.stderr
+    environ = _docker("exec", "-u", "app", container, "cat", "/proc/1/environ")
+    assert environ.returncode == 0, environ.stderr
+
+    # Only counts are reported: a password must never be printed.
+    assert sum(password in inspected.stdout for password in passwords) == 0
+    assert sum(password in environ.stdout for password in passwords) == 0
+    assert "POSTGRES_PASSWORD_FILE=" in inspected.stdout
+
+
+@pytest.mark.req("REQ-55")
+def test_the_service_user_reads_its_own_password_file_but_not_the_owners(container: str) -> None:
+    environ = _docker("exec", "-u", "app", container, "cat", "/proc/1/environ")
+    pairs = dict(e.split("=", 1) for e in environ.stdout.split("\0") if "=" in e)
+    assert "POSTGRES_MIGRATION_PASSWORD_FILE" not in pairs
+
+    inspected = _docker("inspect", "-f", "{{json .Config.Env}}", container).stdout
+    owner_path = next(
+        e.split("=", 1)[1]
+        for e in json.loads(inspected)
+        if e.startswith("POSTGRES_MIGRATION_PASSWORD_FILE=")
+    )
+
+    assert (
+        _docker("exec", "-u", "app", container, "cat", pairs["POSTGRES_PASSWORD_FILE"]).returncode
+        == 0
+    )
+    assert _docker("exec", "-u", "app", container, "cat", owner_path).returncode != 0
 
 
 def _logs_in(role: str, password: str) -> bool:
@@ -163,7 +200,7 @@ def _logs_in(role: str, password: str) -> bool:
 def test_no_value_in_the_service_environment_logs_in_as_the_owner_or_the_superuser(
     container: str,
 ) -> None:
-    environ = _docker("exec", container, "cat", "/proc/1/environ")
+    environ = _docker("exec", "-u", "app", container, "cat", "/proc/1/environ")
     assert environ.returncode == 0, environ.stderr
     values = {entry.split("=", 1)[1] for entry in environ.stdout.split("\0") if "=" in entry} - {""}
     assert len(values) > 5
@@ -178,35 +215,66 @@ def test_no_value_in_the_service_environment_logs_in_as_the_owner_or_the_superus
 
 @pytest.mark.req("REQ-55")
 @pytest.mark.parametrize(
-    ("present", "missing"),
+    ("env", "named"),
     [
         (
-            {"POSTGRES_USER": "mandate_app", "POSTGRES_PASSWORD": "x"},
+            {"POSTGRES_USER": "mandate_app", "POSTGRES_PASSWORD_FILE": "/etc/hostname"},
             "POSTGRES_MIGRATION_USER",
         ),
         (
-            {"POSTGRES_MIGRATION_USER": "mandate_owner", "POSTGRES_MIGRATION_PASSWORD": "x"},
+            {
+                "POSTGRES_MIGRATION_USER": "mandate_owner",
+                "POSTGRES_MIGRATION_PASSWORD_FILE": "/etc/hostname",
+            },
             "POSTGRES_USER",
         ),
         (
             {
                 "POSTGRES_USER": "mandate_app",
-                "POSTGRES_PASSWORD": "x",
+                "POSTGRES_PASSWORD_FILE": "/etc/hostname",
                 "POSTGRES_MIGRATION_USER": "mandate_owner",
             },
-            "POSTGRES_MIGRATION_PASSWORD",
+            "POSTGRES_MIGRATION_PASSWORD_FILE",
+        ),
+        (
+            {
+                "POSTGRES_USER": "mandate_app",
+                "POSTGRES_PASSWORD_FILE": "/no/such/file",
+                "POSTGRES_MIGRATION_USER": "mandate_owner",
+                "POSTGRES_MIGRATION_PASSWORD_FILE": "/etc/hostname",
+            },
+            "POSTGRES_PASSWORD_FILE",
+        ),
+        (
+            {
+                "POSTGRES_USER": "mandate_app",
+                "POSTGRES_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_MIGRATION_USER": "mandate_owner",
+                "POSTGRES_MIGRATION_PASSWORD_FILE": "/no/such/file",
+            },
+            "POSTGRES_MIGRATION_PASSWORD_FILE",
+        ),
+        (
+            {
+                "POSTGRES_USER": "mandate_app",
+                "POSTGRES_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_MIGRATION_USER": "mandate_owner",
+                "POSTGRES_MIGRATION_PASSWORD_FILE": "/etc/hostname",
+                "POSTGRES_PASSWORD": "x",
+            },
+            "POSTGRES_PASSWORD",
         ),
     ],
 )
-def test_a_missing_credential_set_stops_the_start_and_names_the_key(
-    container: str, present: dict[str, str], missing: str
+def test_a_missing_credential_or_file_stops_the_start_and_names_it(
+    container: str, env: dict[str, str], named: str
 ) -> None:
     image = _docker("inspect", "-f", "{{.Config.Image}}", container).stdout.strip()
     assert image
 
-    env_args = [arg for key, value in present.items() for arg in ("-e", f"{key}={value}")]
+    env_args = [arg for key, value in env.items() for arg in ("-e", f"{key}={value}")]
     started = _docker("run", "--rm", *env_args, image)
 
     assert started.returncode != 0
-    assert missing in started.stdout
+    assert named in started.stdout
     assert "PostgreSQL is ready" not in started.stdout

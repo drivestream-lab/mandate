@@ -16,15 +16,19 @@ make deploy-down
 
 `mandate-runner` (in `mandate-verify`) deploys each merge into `develop` to the lab as `lab-mandate` on `lab_local`, then runs `make verify` against `http://lab-mandate:8000`. A red run opens a `develop-red` issue and freezes task merges until a later develop run is green.
 
-It runs the image with `~/.mandate/lab/mandate.env` (kept outside the repos, mode 600). Without that file the deploy fails and develop goes red. A missing key of either set stops the start, naming the key; neither set stands in for the other. The file needs:
+It runs the image with `~/.mandate/lab/mandate.env` (kept outside the repos, mode 600) and the two database password files. The env file keeps only non-secret settings; no password is an environment value. Without the env file or either password file the deploy fails and develop goes red. A missing key or password file stops the start, naming it; neither set stands in for the other.
+
+The password files live in `~/.mandate/lab/secrets/` (mode 600): `app-password` (the app role's password, `MANDATE_DB_APP_PASSWORD` in dev-infra-lab's `.env`) and `owner-password` (the owner role's, `MANDATE_DB_OWNER_PASSWORD`). Each holds only the password. The runner's deployer mounts them read-only into the container at `/run/mandate/app-password` and `/run/mandate/owner-password`, and runs the container as root so the entrypoint can read the owner file for the migration and then drop to the app user: the service cannot read `owner-password` (the entrypoint refuses to start if it can). The env file needs:
 
 | Key | Value |
 | --- | --- |
 | `POSTGRES_HOST`, `POSTGRES_PORT` | `lab-postgres`, `5432` |
 | `POSTGRES_DB` | `mandate` (the runner refuses any other database) |
-| `POSTGRES_USER`, `POSTGRES_PASSWORD` | the app set: `mandate_app` and its password from dev-infra-lab's `.env` (`MANDATE_DB_APP_PASSWORD`). The service connects with these and nothing else |
-| `POSTGRES_MIGRATION_USER`, `POSTGRES_MIGRATION_PASSWORD` | the owner set: `mandate_owner` and its password (`MANDATE_DB_OWNER_PASSWORD`). The entrypoint runs the migrations with these, then starts the service without them; `mandate_owner` must own the `mandate` database |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD_FILE` | the app set: `mandate_app` and `/run/mandate/app-password`. The service connects with these and nothing else |
+| `POSTGRES_MIGRATION_USER`, `POSTGRES_MIGRATION_PASSWORD_FILE` | the owner set: `mandate_owner` and `/run/mandate/owner-password`. The entrypoint runs the migrations with these, then starts the service without them; `mandate_owner` must own the `mandate` database |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB` | `lab-redis`, `6379`, `0` |
 | `APP_ENVIRONMENT`, `APP_PORT` | `development`, `8000` |
+
+`POSTGRES_PASSWORD` and `POSTGRES_MIGRATION_PASSWORD` are refused if set. `make deploy` provides throwaway files from `docker/deploy-secrets/`.
 
 Leave `JWT_PUBLIC_KEY_PATH` unset: the image holds no key file, so a path makes every request answer 500.

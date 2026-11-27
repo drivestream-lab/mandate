@@ -33,7 +33,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(name="database")
-def throwaway_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+def throwaway_database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[str]:
     host, port = setting("MANDATE_DB_HOST"), setting("MANDATE_DB_PORT")
     admin, admin_password = setting("MANDATE_DB_ADMIN_USER", "postgres"), setting(
         "MANDATE_DB_ADMIN_PASSWORD"
@@ -50,14 +50,18 @@ def throwaway_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     engine = create_engine(url, isolation_level="AUTOCOMMIT")
     with engine.connect() as connection:
         connection.execute(text(f'CREATE DATABASE "{name}"'))
+    admin_file = tmp_path / "admin-password"
+    admin_file.write_text(admin_password)
+    app_file = tmp_path / "app-password"
+    app_file.write_text(setting("MANDATE_DB_APP_PASSWORD"))
     migrate_env = {
         **os.environ,
         "POSTGRES_HOST": host,
         "POSTGRES_PORT": port,
         "POSTGRES_USER": admin,
-        "POSTGRES_PASSWORD": admin_password,
+        "POSTGRES_PASSWORD_FILE": str(admin_file),
         "POSTGRES_MIGRATION_USER": admin,
-        "POSTGRES_MIGRATION_PASSWORD": admin_password,
+        "POSTGRES_MIGRATION_PASSWORD_FILE": str(admin_file),
         "POSTGRES_DB": name,
     }
     subprocess.run(
@@ -78,7 +82,7 @@ def throwaway_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     monkeypatch.setenv("POSTGRES_HOST", host)
     monkeypatch.setenv("POSTGRES_PORT", port)
     monkeypatch.setenv("POSTGRES_USER", "mandate_app")
-    monkeypatch.setenv("POSTGRES_PASSWORD", setting("MANDATE_DB_APP_PASSWORD"))
+    monkeypatch.setenv("POSTGRES_PASSWORD_FILE", str(app_file))
     monkeypatch.setenv("POSTGRES_DB", name)
     BaseSettings.clear_instances()
     yield name

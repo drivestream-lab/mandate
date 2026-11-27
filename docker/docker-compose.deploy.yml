@@ -40,6 +40,20 @@ services:
       timeout: 5s
       retries: 20
 
+  # Puts the two throwaway password files (docker/deploy-secrets/) into a volume with the
+  # modes the lab files have: the owner's root-only (0600), the app's world-readable. A bind
+  # mount would keep the checkout's own modes, which the repo cannot fix.
+  database-secrets:
+    image: postgres:16
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -c
+      - install -m 644 /in/app-password /out/app-password && install -m 600 /in/owner-password /out/owner-password
+    volumes:
+      - ./deploy-secrets:/in:ro
+      - database-secrets:/out
+
   mandate:
     build:
       context: ..
@@ -58,9 +72,9 @@ services:
       POSTGRES_PORT: "5432"
       # The app's set is the service's connection; the owner's runs the migrations only.
       POSTGRES_USER: mandate_app
-      POSTGRES_PASSWORD: deploy-app-throwaway
+      POSTGRES_PASSWORD_FILE: /run/mandate/app-password
       POSTGRES_MIGRATION_USER: mandate_owner
-      POSTGRES_MIGRATION_PASSWORD: deploy-owner-throwaway
+      POSTGRES_MIGRATION_PASSWORD_FILE: /run/mandate/owner-password
       POSTGRES_DB: ds_mandate_db
       REDIS_HOST: redis
       REDIS_PORT: "6379"
@@ -69,6 +83,10 @@ services:
       JWT_PUBLIC_KEY_PATH: /app/config/jwt_public.pem
     volumes:
       - ../tests/fixtures/jwt_public.pem:/app/config/jwt_public.pem:ro
+      - database-secrets:/run/mandate:ro
+    # Starts as root so the entrypoint can read the owner's file for the migration, then runs
+    # the service as the app user, which cannot read it.
+    user: "0:0"
     ports:
       - "127.0.0.1:${MANDATE_DEPLOY_PORT:-8000}:8000"
     depends_on:
@@ -76,8 +94,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      database-secrets:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 3s
       timeout: 5s
       retries: 40
+
+volumes:
+  database-secrets:
