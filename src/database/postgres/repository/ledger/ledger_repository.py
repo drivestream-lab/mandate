@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.postgres.schema.ledger.ledger_entry_schema import LedgerEntrySchema
 from src.models.kernel_models import VersionStamp
 from src.models.ledger_models import (
+    GENESIS_HASH,
     LedgerPayloadEnvelope,
     SealedLedgerEntry,
     StoredLedgerEntry,
@@ -47,6 +48,29 @@ class LedgerRepository:
         )
         row = result.first()
         return None if row is None else _to_stored(row)
+
+    async def head_reaches_genesis(self, session: AsyncSession) -> bool:
+        """True when the latest entry links, hash by hash, back to an entry that starts at genesis.
+
+        An empty ledger has no head, so it is true. A head whose link leads nowhere (an orphan),
+        or into a loop, is false. Only the links are followed; each entry's own hash is checked
+        by the caller.
+        """
+        result = await session.execute(
+            text(
+                "WITH RECURSIVE walk(entry_hash, previous_hash) AS ("
+                " SELECT entry_hash, previous_hash FROM ("
+                "  SELECT entry_hash, previous_hash FROM ledger.entries"
+                "  ORDER BY sequence DESC LIMIT 1) AS head"
+                " UNION"
+                " SELECT e.entry_hash, e.previous_hash FROM ledger.entries e"
+                "  JOIN walk w ON e.entry_hash = w.previous_hash)"
+                " SELECT (NOT EXISTS (SELECT 1 FROM ledger.entries))"
+                "  OR EXISTS (SELECT 1 FROM walk WHERE previous_hash = :genesis)"
+            ),
+            {"genesis": GENESIS_HASH},
+        )
+        return bool(result.scalar_one())
 
     async def get_by_hash(self, session: AsyncSession, entry_hash: str) -> StoredLedgerEntry | None:
         """The entry with this hash, or None."""

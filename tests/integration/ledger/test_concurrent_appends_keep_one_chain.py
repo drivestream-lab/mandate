@@ -13,16 +13,11 @@ the stack's throwaway ones. A missing setting fails the test; it never skips.
 """
 
 import asyncio
-import os
-import subprocess
-import sys
 import uuid
-from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import DBAPIError
@@ -31,10 +26,9 @@ from src.business_services.ledger.ledger_append_service import (
     CorrectedEntryNotFoundError,
     LedgerAppendService,
 )
-from src.configs.base_settings import BaseSettings
-from src.database.postgres.connection_manager import PostgresConnectionManager
 from src.database.postgres.repository.ledger.ledger_repository import LedgerRepository
 from src.infra_services.postgres_service import PostgresService
+from tests._helpers.database_settings import setting
 from src.models.kernel_models import NamedVersion, VersionStamp
 from src.models.ledger_models import (
     ChainAnchor,
@@ -57,13 +51,6 @@ _STAMP = VersionStamp(
 )
 
 
-def _setting(name: str, default: str | None = None) -> str:
-    value = os.environ.get(name, default or "")
-    if not value:
-        pytest.fail(f"{name} is not set; see this file's docstring for the settings it needs")
-    return value
-
-
 def _decision(n: int) -> DecisionRecord:
     return DecisionRecord(
         actor="nikd10x",
@@ -78,70 +65,6 @@ def _decision(n: int) -> DecisionRecord:
         model_version="model-7",
         decided_at=datetime(2026, 11, 27, 12, 0, tzinfo=UTC),
     )
-
-
-@pytest.fixture(name="database")
-def throwaway_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    host, port = _setting("MANDATE_DB_HOST"), _setting("MANDATE_DB_PORT")
-    admin, admin_password = _setting("MANDATE_DB_ADMIN_USER", "postgres"), _setting(
-        "MANDATE_DB_ADMIN_PASSWORD"
-    )
-    name = f"ledger_{uuid.uuid4().hex[:12]}"
-    url = URL.create(
-        "postgresql+psycopg2",
-        username=admin,
-        password=admin_password,
-        host=host,
-        port=int(port),
-        database="postgres",
-    )
-    engine = create_engine(url, isolation_level="AUTOCOMMIT")
-    with engine.connect() as connection:
-        connection.execute(text(f'CREATE DATABASE "{name}"'))
-    migrate_env = {
-        **os.environ,
-        "POSTGRES_HOST": host,
-        "POSTGRES_PORT": port,
-        "POSTGRES_USER": admin,
-        "POSTGRES_PASSWORD": admin_password,
-        "POSTGRES_MIGRATION_USER": admin,
-        "POSTGRES_MIGRATION_PASSWORD": admin_password,
-        "POSTGRES_DB": name,
-    }
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "alembic",
-            "-c",
-            str(_ROOT / "postgres_migrations" / "alembic.ini"),
-            "upgrade",
-            "head",
-        ],
-        cwd=_ROOT,
-        env=migrate_env,
-        check=True,
-        capture_output=True,
-    )
-    monkeypatch.setenv("POSTGRES_HOST", host)
-    monkeypatch.setenv("POSTGRES_PORT", port)
-    monkeypatch.setenv("POSTGRES_USER", "mandate_app")
-    monkeypatch.setenv("POSTGRES_PASSWORD", _setting("MANDATE_DB_APP_PASSWORD"))
-    monkeypatch.setenv("POSTGRES_DB", name)
-    BaseSettings.clear_instances()
-    yield name
-    BaseSettings.clear_instances()
-    with engine.connect() as connection:
-        connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
-    engine.dispose()
-
-
-@pytest_asyncio.fixture(name="postgres")
-async def app_postgres(database: str) -> AsyncIterator[PostgresService]:
-    service = PostgresService(PostgresConnectionManager())
-    await service.initialize()
-    yield service
-    await service.close()
 
 
 @pytest.mark.req("REQ-55")
@@ -239,10 +162,10 @@ async def test_an_entry_edited_by_the_owner_is_found(
     assert head is not None
     url = URL.create(
         "postgresql+psycopg2",
-        username=_setting("MANDATE_DB_ADMIN_USER", "postgres"),
-        password=_setting("MANDATE_DB_ADMIN_PASSWORD"),
-        host=_setting("MANDATE_DB_HOST"),
-        port=int(_setting("MANDATE_DB_PORT")),
+        username=setting("MANDATE_DB_ADMIN_USER", "postgres"),
+        password=setting("MANDATE_DB_ADMIN_PASSWORD"),
+        host=setting("MANDATE_DB_HOST"),
+        port=int(setting("MANDATE_DB_PORT")),
         database=database,
     )
     engine = create_engine(url, isolation_level="AUTOCOMMIT")
