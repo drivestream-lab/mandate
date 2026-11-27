@@ -9,7 +9,7 @@ Requirement text lives in `mandate-meta/prd/INIT-MANDATE-001.md`; this table tra
 | REQ-01 | W1 | not started | |
 | REQ-02 | W1 | not started | |
 | REQ-39 | W1 | not started | |
-| REQ-40 | W1 | not started | |
+| REQ-40 | W1 | implemented | Mandate's Paperclip identity only (TASK-W0-07): its client acts inside its own run, refuses an unpinned release, and cannot create agents or skills or assign tasks; proved by tests/contract/paperclip against the run stack. Deciding gates comes later |
 | REQ-42 | W1 | not started | |
 | REQ-43 | W1 | not started | |
 | REQ-54 | W1 | implemented | Decision entries (TASK-W0-04): the ledger writer stores actor, role, rung, options offered, choice, reasons, evidence, target version, workflow version, model version and decided_at in the hashed payload, with the version stamp (policy revision, skills, Mandate release and the rest) beside it. The stamp has no workflow or model version, so the decision record carries them. Unit-tested on the pure record and entry; no gate writes decisions yet |
