@@ -29,7 +29,7 @@ The lead gives you the repo, the PR number, the head sha and the task id.
    - logs: `docker compose -p mandate-pr-<n> logs --no-color mandate | tail -300`;
    - the runner's own run log for this head: the `target_url` of its `mandate/build-verified` status.
    Never write to a database, and never print a secret (redact tokens, keys and passwords if they appear).
-4. Tear down: `make deploy-down DEPLOY_PROJECT=mandate-pr-<n>`, then `git worktree remove --force ../.worktrees/verify-<n>`.
+4. Tear down: `env -u GITHUB_TOKEN -u GH_TOKEN make deploy-down DEPLOY_PROJECT=mandate-pr-<n>`, then `git worktree remove --force ../.worktrees/verify-<n>`.
 5. Post one PR comment, never a review, as `mandate-challenger`:
    ```bash
    S=$(git rev-parse --show-toplevel)/scripts/swarm

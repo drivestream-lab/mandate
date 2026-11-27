@@ -11,7 +11,7 @@ For each PR, in that PR's builder worktree (`../.worktrees/<branch>`), or a fres
 1. `git fetch origin && git merge origin/develop`. Merge, never rebase: the branch is pushed and its head was reviewed.
 2. Resolve conflicts so that both sides keep doing what they did: develop's merged behaviour stays, and the task's change is applied on top of it. Never drop, weaken or extend what the task does, never change its tests' intent, and never touch files outside the task's list except where the conflict sits.
 3. If a conflict cannot be resolved without changing what the task does (two tasks disagree on behaviour), stop and report it to the lead with both sides; that is a question for KD.
-4. Run `make setup && make check && make test`. If they fail because of the merge, fix only the merge. If they fail otherwise, stop and report.
+4. Run `env -u GITHUB_TOKEN -u GH_TOKEN bash -c 'make setup && make check && make test'` (KD's token never reaches the PR's code). If they fail because of the merge, fix only the merge. If they fail otherwise, stop and report.
 5. Commit and push as mandate-builder only:
    ```bash
    S=$(git rev-parse --show-toplevel)/scripts/swarm

@@ -31,7 +31,7 @@ Do not check out into the main worktree; read with `git show FETCH_HEAD:<path>`,
 - The behaviour matches the spec where the spec is clear. If the spec is unclear or contradicts itself, that is a finding addressed to KD, not something to settle yourself.
 - Protected paths touched are declared in the PR body.
 
-You do not run the checks; the runner does. You may run read-only commands (`rg`, `git show`, `make check` in a throwaway worktree) to confirm a suspicion.
+You do not run the checks; the runner does. You may run read-only commands (`rg`, `git show`, `env -u GITHUB_TOKEN -u GH_TOKEN make check` in a throwaway worktree) to confirm a suspicion.
 
 ## Post on the head commit, as mandate-challenger only
 

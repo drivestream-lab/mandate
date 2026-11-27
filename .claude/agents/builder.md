@@ -40,7 +40,7 @@ Run, in the worktree, and keep the output:
 env -u GITHUB_TOKEN -u GH_TOKEN bash -c 'make setup && make check && make test'
 ```
 (KD's `GITHUB_TOKEN` must never reach code under test.)
-plus the task's verify command for every journey it touches. All must pass before you push. If a check fails for a reason outside your task, stop and report it.
+plus the task's verify command for every journey it touches, also under `env -u GITHUB_TOKEN -u GH_TOKEN` (journeys reach GitHub only through the test App's key, never KD's token). All must pass before you push. If a check fails for a reason outside your task, stop and report it.
 
 ## Commit, push, open the PR (as mandate-builder only)
 

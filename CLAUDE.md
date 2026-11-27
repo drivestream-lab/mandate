@@ -86,7 +86,7 @@ The lead is a Claude Code session working the implementation plan wave by wave, 
 7. **Close the wave.** When every task of the wave has merged and develop is green, open the wave PR from `develop` into `main` as `mandate-builder`, with a brief: tasks merged, journeys run, findings, spend. Then:
    - the `verifier` in wave mode checks the lab deploy of the develop head (the runner's develop run, `lab-mandate`'s tables and logs) against every exit criterion of the wave, and posts the evidence;
    - when it holds, `mandate-builder` adds `wave-accepted` and marks the PR ready, and the verifier posts the signoff as `mandate-challenger`: an Approve whose body has `Signoff: wave`, `Initiative: INIT-MANDATE-001` and `Head: <full head sha>`, and no challenger marker;
-   - merging into `main` waits for KD: nothing merges into `main` until KD says so (27 Nov 2026). When it does, the merge must also refuse while a `develop-red` issue is open, because the runner freezes only PRs into `develop`.
+   - then the lead stops and waits for KD: nothing merges into `main` until KD says so (27 Nov 2026), and the next wave starts only once `main` has moved. When KD allows main merges, the merge must also refuse while a `develop-red` issue is open, because the runner freezes only PRs into `develop`.
 8. **Record** each merge, failure and stop as one comment on the build-log issue (below).
 
 ### Stop and wait for KD, only when
