@@ -1,4 +1,4 @@
-.PHONY: setup check check-ci format format-check lint lint-check types layers test journeys run deploy deploy-down verify
+.PHONY: setup check check-ci format format-check lint lint-check types layers test journeys run deploy deploy-down verify integration
 
 setup:
 	@bash scripts/setup_dev.sh
@@ -67,4 +67,24 @@ deploy-down:
 
 verify:
 	python3 tests/verify/verify_health.py
+ifeq ($(origin MANDATE_SERVICE_URL),environment)
+	@echo "verify: integration tests not run: MANDATE_SERVICE_URL points at a service this checkout did not deploy (the lab has no superuser to make throwaway databases)"
+else
+	@$(MAKE) --no-print-directory integration
+endif
+
+# make integration: the real-Postgres tests (tests/integration) against make deploy's own
+# Postgres, with its throwaway credentials read from the running container (KD, 27 Nov 2026:
+# make verify runs them, so the runner gates them on every PR).
+integration:
+	@set -e; \
+	if [ -n "$$MANDATE_RUNNER_HEAD_SHA" ]; then host=postgres; port=5432; \
+	else hp=$$($(DEPLOY_COMPOSE) port postgres 5432); host=$${hp%:*}; port=$${hp##*:}; fi; \
+	test -n "$$host" && test -n "$$port" || { echo "integration: no make deploy stack ($(DEPLOY_PROJECT)); run make deploy first" >&2; exit 1; }; \
+	envs=$$($(DEPLOY_COMPOSE) exec -T postgres printenv); \
+	pw() { printf '%s\n' "$$envs" | sed -n "s/^$$1=//p"; }; \
+	MANDATE_DB_HOST=$$host MANDATE_DB_PORT=$$port MANDATE_DB_NAME=ds_mandate_db \
+	MANDATE_DB_ADMIN_USER=postgres MANDATE_DB_ADMIN_PASSWORD="$$(pw POSTGRES_PASSWORD)" \
+	MANDATE_DB_OWNER_PASSWORD="$$(pw MANDATE_DB_OWNER_PASSWORD)" MANDATE_DB_APP_PASSWORD="$$(pw MANDATE_DB_APP_PASSWORD)" \
+	.venv/bin/pytest tests/integration -v
 
