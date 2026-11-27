@@ -21,7 +21,7 @@ Requirement text lives in `mandate-meta/prd/INIT-MANDATE-001.md`; this table tra
 | REQ-86 | W1 | not started | |
 | REQ-103 | W1 | not started | |
 | REQ-108 | W1 | not started | |
-| REQ-118 | W1 | not started | |
+| REQ-118 | W1 | implemented | The deciding role's structured call (option, reasons, evidence cited) only (TASK-W0-08): a scripted deciding role on Paperclip's process adapter returns it, checked against the shared model, and an output that fails its schema counts as missing; proved by tests/journeys/test_agents against the run stack. Gate classes and blind-first sealing come later |
 | REQ-120 | W1 | unit-tested | scripts/record_review_decision.py writes a decision as a ledger-format JSON line to a local file; tests/unit/test_review_decision.py (TASK-W0-01). The import into the ledger is W1 |
 | REQ-121 | W1 | not started | |
 | REQ-122 | W1 | not started | |

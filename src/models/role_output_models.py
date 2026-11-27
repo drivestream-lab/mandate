@@ -5,7 +5,12 @@ their output with the same models, so a change here breaks them in the same pull
 An output that does not fit its schema is treated as missing, never repaired.
 """
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+
+_Text = Annotated[str, Field(min_length=1)]
 
 
 class RoleOutput(BaseModel):
@@ -16,8 +21,8 @@ class DecidingRoleCall(RoleOutput):
     """A deciding role's structured call: the option it picks, why, and the evidence it cites."""
 
     option: str = Field(min_length=1)
-    reasons: tuple[str, ...] = Field(min_length=1)
-    evidence_cited: tuple[str, ...] = Field(min_length=1)
+    reasons: tuple[_Text, ...] = Field(min_length=1)
+    evidence_cited: tuple[_Text, ...] = Field(min_length=1)
 
 
 class CoderResult(RoleOutput):
@@ -25,7 +30,7 @@ class CoderResult(RoleOutput):
 
     summary: str = Field(min_length=1)
     branch: str = Field(min_length=1)
-    changed_files: tuple[str, ...] = Field(min_length=1)
+    changed_files: tuple[_Text, ...] = Field(min_length=1)
 
 
 def read_role_output[M: RoleOutput](model: type[M], text: str | None) -> M | None:

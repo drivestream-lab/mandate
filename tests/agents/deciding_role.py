@@ -7,24 +7,35 @@ fails and the call counts as missing.
 """
 
 import sys
-from typing import Any
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.models.role_output_models import DecidingRoleCall
 from tests.agents.agent_runtime import run_scripted_step
 
 
-def decide(brief: dict[str, Any]) -> dict[str, Any]:
-    options = [str(option) for option in brief["options"]]
-    omit = brief.get("fault") == "omit_evidence"
-    evidence = [] if omit else [str(item) for item in brief["evidence"]]
+class DecidingBrief(BaseModel):
+    """What the issue description carries for a deciding role."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    options: tuple[str, ...] = Field(min_length=1)
+    evidence: tuple[str, ...]
+    fault: Literal["omit_evidence"] | None = None
+
+
+def decide(brief: DecidingBrief) -> dict[str, object]:
+    first = brief.options[0]
+    evidence = () if brief.fault == "omit_evidence" else brief.evidence
     return {
-        "option": options[0],
+        "option": first,
         "reasons": [
-            f"{options[0]} is first of {len(options)} options and the evidence supports it"
+            f"{first} is first of {len(brief.options)} options and the evidence supports it"
         ],
-        "evidence_cited": evidence,
+        "evidence_cited": list(evidence),
     }
 
 
 if __name__ == "__main__":
-    sys.exit(run_scripted_step(DecidingRoleCall, decide))
+    sys.exit(run_scripted_step(DecidingBrief, DecidingRoleCall, decide))

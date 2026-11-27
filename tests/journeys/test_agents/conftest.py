@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pydantic
 import pytest
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pytest import TempPathFactory
 
 from src.models.paperclip_models import RunStatusType
@@ -74,6 +75,46 @@ def agent_host(journey_stack: StackAddresses, tmp_path_factory: TempPathFactory)
     return container
 
 
+class _Record(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+
+class RunListing(_Record):
+    """One row of Paperclip's run list."""
+
+    id: str
+    issue_id: str | None = Field(default=None, alias="issueId")
+    status: RunStatusType
+    retry_of_run_id: str | None = Field(default=None, alias="retryOfRunId")
+
+
+class RunResult(_Record):
+    """What the process adapter kept of the script's output."""
+
+    stdout: str = ""
+    stderr: str = ""
+
+
+class RunDetail(_Record):
+    """A finished run, as Paperclip reports it."""
+
+    id: str
+    status: RunStatusType
+    exit_code: int | None = Field(default=None, alias="exitCode")
+    result_json: RunResult | None = Field(default=None, alias="resultJson")
+
+    @property
+    def stdout(self) -> str:
+        return self.result_json.stdout if self.result_json else ""
+
+    @property
+    def stderr(self) -> str:
+        return self.result_json.stderr if self.result_json else ""
+
+
+_RUNS = TypeAdapter(list[RunListing])
+
+
 class AgentDesk:
     """The board's view of Paperclip: hire a scripted agent, give it a brief, wait for its run."""
 
@@ -114,28 +155,24 @@ class AgentDesk:
         response = self._http.post(f"/api/companies/{self.identity.company_id}/issues", json=body)
         return str(response.raise_for_status().json()["id"])
 
-    def first_finished_run(self, agent_id: str, issue_id: str) -> dict[str, object]:
+    def first_finished_run(self, agent_id: str, issue_id: str) -> RunDetail:
         """The earliest run on the issue that has reached an end state."""
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            runs = (
-                self._http.get(
-                    f"/api/companies/{self.identity.company_id}/heartbeat-runs",
-                    params={"agentId": agent_id},
-                )
-                .raise_for_status()
-                .json()
-            )
+            listing = self._http.get(
+                f"/api/companies/{self.identity.company_id}/heartbeat-runs",
+                params={"agentId": agent_id},
+            ).raise_for_status()
             done = [
                 run
-                for run in runs
-                if run["issueId"] == issue_id
-                and run["status"] in _TERMINAL
-                and run["retryOfRunId"] is None
+                for run in _RUNS.validate_json(listing.content)
+                if run.issue_id == issue_id
+                and run.status in _TERMINAL
+                and run.retry_of_run_id is None
             ]
             if done:
-                detail = self._http.get(f"/api/heartbeat-runs/{done[0]['id']}")
-                return detail.raise_for_status().json()  # type: ignore[no-any-return]
+                detail = self._http.get(f"/api/heartbeat-runs/{done[0].id}").raise_for_status()
+                return RunDetail.model_validate_json(detail.content)
             time.sleep(1)
         raise TimeoutError("the agent's run did not finish")
 
