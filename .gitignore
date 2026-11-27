@@ -6,3 +6,9 @@
 !prayog-skills/
 .claude/skills/*
 .cursor/skills/
+
+# Local build output
+.venv/
+__pycache__/
+logs/
+.env
