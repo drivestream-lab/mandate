@@ -21,7 +21,7 @@ from collections.abc import Iterator
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, Connection
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 SERVICE_APPLICATION_NAME = "mandate"
 OWNER_KEYS = ("POSTGRES_MIGRATION_USER", "POSTGRES_MIGRATION_PASSWORD")
@@ -125,6 +125,7 @@ def test_the_role_the_service_runs_as_cannot_rewrite_the_ledger(
 def test_the_running_service_does_not_hold_the_owner_credentials(container: str) -> None:
     owner_password = _setting("MANDATE_DB_OWNER_PASSWORD")
     app_password = _setting("MANDATE_DB_APP_PASSWORD")
+    assert owner_password != app_password, "the owner and app passwords must differ"
 
     # The entrypoint execs the service, so it is process 1 and its environment is the service's.
     environ = _docker("exec", container, "cat", "/proc/1/environ")
@@ -134,10 +135,45 @@ def test_the_running_service_does_not_hold_the_owner_credentials(container: str)
 
     assert pairs.get("POSTGRES_USER") == "mandate_app"
     assert not [key for key in OWNER_KEYS if key in pairs]
-    if owner_password != app_password:
-        assert owner_password not in pairs.values()
+    assert owner_password not in pairs.values()
     command = _docker("exec", container, "cat", "/proc/1/cmdline").stdout
     assert "src.main" in command
+
+
+def _logs_in(role: str, password: str) -> bool:
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=role,
+        password=password,
+        host=_setting("MANDATE_DB_HOST"),
+        port=int(_setting("MANDATE_DB_PORT")),
+        database=_setting("MANDATE_DB_NAME"),
+    )
+    engine = create_engine(url, connect_args={"connect_timeout": 5})
+    try:
+        with engine.connect():
+            return True
+    except OperationalError:
+        return False
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.req("REQ-55")
+def test_no_value_in_the_service_environment_logs_in_as_the_owner_or_the_superuser(
+    container: str,
+) -> None:
+    environ = _docker("exec", container, "cat", "/proc/1/environ")
+    assert environ.returncode == 0, environ.stderr
+    values = {entry.split("=", 1)[1] for entry in environ.stdout.split("\0") if "=" in entry} - {""}
+    assert len(values) > 5
+
+    # Only counts are reported: a value that logs in must never be printed.
+    owner_hits = sum(_logs_in("mandate_owner", value) for value in values)
+    superuser_hits = sum(_logs_in("postgres", value) for value in values)
+    assert owner_hits == 0, f"{owner_hits} environment values log in as mandate_owner"
+    assert superuser_hits == 0, f"{superuser_hits} environment values log in as postgres"
+    assert _logs_in("mandate_app", _setting("MANDATE_DB_APP_PASSWORD"))
 
 
 @pytest.mark.req("REQ-55")

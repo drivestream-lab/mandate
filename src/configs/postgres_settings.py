@@ -26,8 +26,8 @@ class PostgresSettings(BaseSettings):
 
     host: str = Field(default="localhost", description="PostgreSQL host")
     port: int = Field(default=5432, description="PostgreSQL port")
-    user: str = Field(default="postgres", description="PostgreSQL user")
-    password: SecretStr = Field(default=SecretStr("postgres"), description="PostgreSQL password")
+    user: str = Field(description="PostgreSQL user (POSTGRES_USER); no default")
+    password: SecretStr = Field(description="PostgreSQL password (POSTGRES_PASSWORD); no default")
     migration_user: Optional[str] = Field(
         default=None,
         description="Migration role (mandate_owner); used by the migration step only, never by the service",

@@ -19,6 +19,8 @@ def reset_settings() -> None:
     """Clear settings singletons and set minimal JWT env for in-process tests."""
     os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-ci-only")
     os.environ.setdefault("JWT_ALGORITHM", "HS256")
+    os.environ.setdefault("POSTGRES_USER", "unit_test_user")
+    os.environ.setdefault("POSTGRES_PASSWORD", "unit-test-password")
     BaseSettings.clear_instances()
 
 
