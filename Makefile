@@ -26,7 +26,7 @@ layers:
 	.venv/bin/lint-imports
 
 test:
-	.venv/bin/pytest tests/unit/ -v --require-req-coverage
+	.venv/bin/pytest tests/unit/ tests/properties/ -v --require-req-coverage
 
 # make journeys: the end-to-end journeys against the local ephemeral stack. Paths and pytest
 # options go in ARGS: make journeys ARGS="tests/journeys/foo.py -x". With none, every journey
