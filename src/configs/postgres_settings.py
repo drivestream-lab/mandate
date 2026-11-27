@@ -26,8 +26,16 @@ class PostgresSettings(BaseSettings):
 
     host: str = Field(default="localhost", description="PostgreSQL host")
     port: int = Field(default=5432, description="PostgreSQL port")
-    user: str = Field(default="postgres", description="PostgreSQL user")
-    password: SecretStr = Field(default=SecretStr("postgres"), description="PostgreSQL password")
+    user: str = Field(description="PostgreSQL user (POSTGRES_USER); no default")
+    password: SecretStr = Field(description="PostgreSQL password (POSTGRES_PASSWORD); no default")
+    migration_user: Optional[str] = Field(
+        default=None,
+        description="Migration role (mandate_owner); used by the migration step only, never by the service",
+    )
+    migration_password: Optional[SecretStr] = Field(
+        default=None,
+        description="Migration role password; the entrypoint removes it before the service starts",
+    )
     db: str = Field(
         default="ds_mandate_db",
         description="PostgreSQL database name",
@@ -47,11 +55,22 @@ class PostgresSettings(BaseSettings):
         password = quote_plus(self.password.get_secret_value())
         return f"postgresql+asyncpg://{self.user}:{password}@{self.host}:{self.port}/{self.db}"
 
-    @computed_field
     @property
     def alembic_database_uri(self) -> str:
-        password = quote_plus(self.password.get_secret_value())
-        conn_str = f"postgresql+psycopg2://{self.user}:{password}@{self.host}:{self.port}/{self.db}"
+        """Migration connection: the owner's credentials, never the service's."""
+        if not self.migration_user:
+            raise ValueError(
+                "POSTGRES_MIGRATION_USER is not set; migrations never use the app role"
+            )
+        if self.migration_password is None:
+            raise ValueError(
+                "POSTGRES_MIGRATION_PASSWORD is not set; migrations never use the app role"
+            )
+        password = quote_plus(self.migration_password.get_secret_value())
+        conn_str = (
+            f"postgresql+psycopg2://{self.migration_user}:{password}"
+            f"@{self.host}:{self.port}/{self.db}"
+        )
         if self.use_ssl:
             conn_str += f"?sslmode={'require' if not self.ssl_mode else self.ssl_mode}"
         return conn_str

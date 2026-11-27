@@ -16,4 +16,6 @@ SELECT format('CREATE ROLE mandate_owner LOGIN PASSWORD %L', :'owner_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mandate_owner') \gexec
 SELECT format('CREATE ROLE mandate_app LOGIN PASSWORD %L', :'app_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mandate_app') \gexec
+-- The owner runs the migrations, so it owns the database (and with it the public schema).
+SELECT format('ALTER DATABASE %I OWNER TO mandate_owner', current_database()) \gexec
 SQL

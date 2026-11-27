@@ -13,12 +13,13 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: deploy-superuser-throwaway
       POSTGRES_DB: ds_mandate_db
       # Throwaway deploy-stack passwords for the two roles the lab also has; the init script
-      # below creates them, the migration only grants to them.
-      MANDATE_DB_OWNER_PASSWORD: postgres
-      MANDATE_DB_APP_PASSWORD: postgres
+      # below creates them, the migration only grants to them. The three passwords differ, so
+      # the service's own password logs in as mandate_app and nothing else.
+      MANDATE_DB_OWNER_PASSWORD: deploy-owner-throwaway
+      MANDATE_DB_APP_PASSWORD: deploy-app-throwaway
     volumes:
       - ./postgres/10-mandate-roles.sh:/docker-entrypoint-initdb.d/10-mandate-roles.sh:ro
     # Published on a free loopback port so a journey can connect as each role:
@@ -55,8 +56,11 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # The app's set is the service's connection; the owner's runs the migrations only.
+      POSTGRES_USER: mandate_app
+      POSTGRES_PASSWORD: deploy-app-throwaway
+      POSTGRES_MIGRATION_USER: mandate_owner
+      POSTGRES_MIGRATION_PASSWORD: deploy-owner-throwaway
       POSTGRES_DB: ds_mandate_db
       REDIS_HOST: redis
       REDIS_PORT: "6379"

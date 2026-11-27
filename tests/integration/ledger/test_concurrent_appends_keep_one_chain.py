@@ -104,6 +104,8 @@ def throwaway_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         "POSTGRES_PORT": port,
         "POSTGRES_USER": admin,
         "POSTGRES_PASSWORD": admin_password,
+        "POSTGRES_MIGRATION_USER": admin,
+        "POSTGRES_MIGRATION_PASSWORD": admin_password,
         "POSTGRES_DB": name,
     }
     subprocess.run(
