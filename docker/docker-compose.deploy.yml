@@ -55,8 +55,11 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_USER: postgres
+      # The app's set is the service's connection; the owner's runs the migrations only.
+      POSTGRES_USER: mandate_app
       POSTGRES_PASSWORD: postgres
+      POSTGRES_MIGRATION_USER: mandate_owner
+      POSTGRES_MIGRATION_PASSWORD: postgres
       POSTGRES_DB: ds_mandate_db
       REDIS_HOST: redis
       REDIS_PORT: "6379"
