@@ -24,6 +24,8 @@ from src.models.paperclip_models import (
     PaperclipRequest,
     CommentRequest,
     IssueRequest,
+    HealthStatusType,
+    InteractionKindType,
     NewIssue,
     NewQuestion,
     PaperclipComment,
@@ -68,6 +70,8 @@ def check_release(health: PaperclipHealth, pinned_commit: str) -> None:
 
     A missing commit, an abbreviated one or a different one is a stop.
     """
+    if health.status is not HealthStatusType.OK:
+        raise UnrecognisedReleaseError("Paperclip is starting; Mandate does not proceed")
     if not health.commit:
         raise UnrecognisedReleaseError("Paperclip did not report its build commit")
     if health.commit != pinned_commit:
@@ -83,7 +87,7 @@ def _comment_request_id(key: IdempotencyKey) -> str:
 
 _JSON = {"Content-Type": "application/json"}
 _COMMENTS = TypeAdapter(list[PaperclipComment])
-_QUESTIONS = TypeAdapter(list[PaperclipQuestion])
+_CARDS = TypeAdapter(list[dict[str, object]])
 
 
 class PaperclipService(BaseInfraService):
@@ -207,12 +211,26 @@ class PaperclipService(BaseInfraService):
         return self._parse(PaperclipIssue, await self._read(path), path)
 
     async def list_comments(self, issue_id: str) -> list[PaperclipComment]:
-        response = await self._read(f"/api/issues/{issue_id}/comments")
-        return _COMMENTS.validate_json(response.content)
+        path = f"/api/issues/{issue_id}/comments"
+        response = await self._read(path)
+        try:
+            return _COMMENTS.validate_json(response.content)
+        except ValueError as error:
+            raise PaperclipError(f"unexpected answer from Paperclip for {path}") from error
 
     async def list_questions(self, issue_id: str) -> list[PaperclipQuestion]:
-        response = await self._read(f"/api/issues/{issue_id}/interactions")
-        return _QUESTIONS.validate_json(response.content)
+        """The questions Mandate can read on an issue; cards of any other kind are left unread."""
+        path = f"/api/issues/{issue_id}/interactions"
+        response = await self._read(path)
+        try:
+            cards = _CARDS.validate_json(response.content)
+            return [
+                PaperclipQuestion.model_validate(card)
+                for card in cards
+                if card.get("kind") == InteractionKindType.ASK_USER_QUESTIONS
+            ]
+        except ValueError as error:
+            raise PaperclipError(f"unexpected answer from Paperclip for {path}") from error
 
     def _ready(self) -> httpx.AsyncClient:
         if self._client is None:

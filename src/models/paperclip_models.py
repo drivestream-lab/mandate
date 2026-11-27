@@ -10,6 +10,7 @@ class HealthStatusType(StrEnum):
     """What Paperclip's health report says about itself."""
 
     OK = "ok"
+    STARTING = "starting"
 
 
 class RunStatusType(StrEnum):
@@ -45,6 +46,11 @@ class InteractionKindType(StrEnum):
     REQUEST_CONFIRMATION = "request_confirmation"
     REQUEST_CHECKBOX_CONFIRMATION = "request_checkbox_confirmation"
     REQUEST_ITEM_VERDICTS = "request_item_verdicts"
+    CONNECTION_INTENT = "connection_intent"
+    SUGGEST_ROUTINE = "suggest_routine"
+    PROPOSE_RESPONSIBILITY_BAR = "propose_responsibility_bar"
+    PROPOSE_AUTOMATION = "propose_automation"
+    PROPOSE_DASHBOARD_CHANGES = "propose_dashboard_changes"
 
 
 class InteractionStatusType(StrEnum):

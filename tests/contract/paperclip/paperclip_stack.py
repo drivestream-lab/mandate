@@ -34,6 +34,7 @@ class MandateIdentity:
     project_id: str
     agent_id: str
     other_agent_id: str
+    other_token_file: Path
     token_file: Path
     board_user_id: str
 
@@ -102,6 +103,12 @@ def provision_mandate_identity(base_url: str, token_file: Path) -> MandateIdenti
         ).raise_for_status()
         token_file.write_text(_Token.model_validate(key.json()).token, encoding="utf-8")
         token_file.chmod(0o600)
+        other_key = board.post(f"/api/agents/{other_id}/keys", json={"name": "other"})
+        other_token_file = token_file.with_name("other-token")
+        other_token_file.write_text(
+            _Token.model_validate(other_key.raise_for_status().json()).token, encoding="utf-8"
+        )
+        other_token_file.chmod(0o600)
 
     return MandateIdentity(
         base_url=base_url,
@@ -109,6 +116,7 @@ def provision_mandate_identity(base_url: str, token_file: Path) -> MandateIdenti
         project_id=project_id,
         agent_id=agent_id,
         other_agent_id=other_id,
+        other_token_file=other_token_file,
         token_file=token_file,
         board_user_id=board_user_id,
     )

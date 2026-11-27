@@ -139,3 +139,48 @@ async def test_mandate_cannot_assign_a_task(
     assert on_create.status_code == 403
     assert on_update.status_code == 403
     assert (await paperclip.get_issue(issue.id)).assignee_agent_id is None
+
+
+async def test_mandate_still_reads_its_question_beside_another_agents_card(
+    paperclip: PaperclipService, mandate_identity: MandateIdentity
+) -> None:
+    work_item = f"work-item-{uuid.uuid4().hex[:12]}"
+    run = await paperclip.open_run(work_item, "beside")
+    issue = await paperclip.create_issue(run, work_item, "beside", NewIssue(title="Shared"))
+    question = await paperclip.open_question(
+        run,
+        work_item,
+        "beside",
+        issue.id,
+        NewQuestion(
+            question_id="choice",
+            title="Which",
+            prompt="Pick one",
+            options=(QuestionOption(id="a", label="A"), QuestionOption(id="b", label="B")),
+        ),
+    )
+
+    other_token = mandate_identity.other_token_file.read_text(encoding="utf-8").strip()
+    async with httpx.AsyncClient(
+        base_url=mandate_identity.base_url,
+        headers={"Authorization": f"Bearer {other_token}"},
+        timeout=30,
+    ) as other:
+        woken = await other.post(
+            f"/api/agents/{mandate_identity.other_agent_id}/wakeup",
+            json={"source": "on_demand", "triggerDetail": "manual"},
+        )
+        card = await other.post(
+            f"/api/issues/{issue.id}/interactions",
+            headers={"X-Paperclip-Run-Id": woken.json()["id"]},
+            json={
+                "kind": "request_confirmation",
+                "continuationPolicy": "none",
+                "payload": {"version": 1, "prompt": "Proceed?"},
+            },
+        )
+        raw_cards = (await other.get(f"/api/issues/{issue.id}/interactions")).json()
+
+    assert card.status_code == 201
+    assert {c["kind"] for c in raw_cards} == {"ask_user_questions", "request_confirmation"}
+    assert [q.id for q in await paperclip.list_questions(issue.id)] == [question.id]
