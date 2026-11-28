@@ -94,6 +94,25 @@ class LedgerRepository:
         row = result.first()
         return None if row is None else _to_stored(row)
 
+    async def find_decision(
+        self, session: AsyncSession, actor: str, role: str, target_version: str
+    ) -> StoredLedgerEntry | None:
+        """The first decision by this actor in this role on this version, or None."""
+        content = _ENTRIES.c.payload["content"]
+        result = await session.execute(
+            select(_ENTRIES)
+            .where(
+                _ENTRIES.c.entry_type == "decision",
+                content["actor"].astext == actor,
+                content["role"].astext == role,
+                content["target_version"].astext == target_version,
+            )
+            .order_by(_ENTRIES.c.sequence)
+            .limit(1)
+        )
+        row = result.first()
+        return None if row is None else _to_stored(row)
+
     async def read_all(self, session: AsyncSession) -> list[StoredLedgerEntry]:
         """Every entry in sequence order."""
         result = await session.execute(select(_ENTRIES).order_by(_ENTRIES.c.sequence))

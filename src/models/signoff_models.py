@@ -1,0 +1,108 @@
+"""Signoff models: a pull request as read from GitHub, who holds a gate, and what the check says."""
+
+from datetime import datetime
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.models.gate_models import PullRequestRef
+from src.models.ledger_models import RungType
+
+_NON_BLANK = r"\S"
+_SHA = r"^[0-9a-f]{40}$"
+
+GATE_DECISION_CONTEXT = "mandate/gate-decision"
+"""The name of the one required check on develop and main."""
+
+
+class ReviewStateType(StrEnum):
+    """The states GitHub reports for a pull request review."""
+
+    APPROVED = "APPROVED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+    COMMENTED = "COMMENTED"
+    DISMISSED = "DISMISSED"
+    PENDING = "PENDING"
+
+
+class PullReview(BaseModel):
+    """One review on a pull request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reviewer: str = Field(min_length=1)
+    state: ReviewStateType
+    commit_id: str = Field(pattern=_SHA)
+    body: str
+    submitted_at: datetime
+
+
+class PullRequestSnapshot(BaseModel):
+    """What the check reads: the head, the labels, the ready state and every review."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ref: PullRequestRef
+    head_sha: str = Field(pattern=_SHA)
+    labels: tuple[str, ...]
+    is_draft: bool
+    reviews: tuple[PullReview, ...]
+
+
+class GateRule(BaseModel):
+    """A gate as the check knows it: its label, its rung and who holds it at that rung."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str = Field(min_length=1, pattern=_NON_BLANK)
+    rung: RungType
+    holders: frozenset[str] = Field(min_length=1, description="Logins that may sign this gate")
+
+
+class Attestation(BaseModel):
+    """What an Approve's body must carry: the initiative, the head and the gate it signs."""
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    initiative: str = Field(min_length=1, pattern=_NON_BLANK)
+    head: str = Field(pattern=_SHA)
+    gate: str = Field(min_length=1, pattern=_NON_BLANK)
+
+
+class SignoffReading(BaseModel):
+    """A complete signoff on the current head: label, attested Approve and ready, by a holder."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    signer: str
+    label: str
+    head_sha: str
+    signed_at: datetime
+    attestation: Attestation
+
+
+class GateDecisionStateType(StrEnum):
+    """What Mandate posts on the head."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+
+
+class SignoffAssessment(BaseModel):
+    """The result of reading a pull request against a gate: a signoff, or the reason for none."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    signoff: SignoffReading | None
+    reason: str | None
+
+
+class GateDecisionOutcome(BaseModel):
+    """What the check posted on a head, and why."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    state: GateDecisionStateType
+    head_sha: str
+    reason: str
+    signer: str | None
