@@ -20,21 +20,17 @@ class EvidenceSettings(BaseSettings):
     )
     workflow_path: str = Field(default=".github/workflows/verify.yml", min_length=1)
     signer_ref: str = Field(
-        default="refs/tags/evidence-1", description="The pinned tag of the signer workflow"
-    )
-    signer_commit: str = Field(
-        default="73eac8ac292c1e520b2ce4b2e457e823c38c7fb4",
-        pattern=r"^[0-9a-f]{40}$",
-        description="The commit the signer tag must point at; the trust root is this commit",
+        default="refs/heads/main",
+        description="The branch of the signer workflow; its head, read live, is the trust root",
     )
     api_url: str = Field(default="https://api.github.com")
     request_timeout_seconds: float = Field(default=60.0, gt=0)
 
     @field_validator("signer_ref")
     @classmethod
-    def _must_be_a_tag(cls, value: str) -> str:
-        if not value.startswith("refs/tags/") or len(value) <= len("refs/tags/"):
-            raise ValueError("the signer must be pinned to a tag (refs/tags/<name>)")
+    def _must_be_a_branch(cls, value: str) -> str:
+        if not value.startswith("refs/heads/") or len(value) <= len("refs/heads/"):
+            raise ValueError("the signer must be a branch (refs/heads/<name>)")
         return value
 
     @property
@@ -43,5 +39,5 @@ class EvidenceSettings(BaseSettings):
         return f"https://github.com/{self.verify_repository}/{self.workflow_path}@{self.signer_ref}"
 
     @property
-    def signer_tag(self) -> str:
-        return self.signer_ref.removeprefix("refs/tags/")
+    def signer_branch(self) -> str:
+        return self.signer_ref.removeprefix("refs/heads/")

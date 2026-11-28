@@ -1,12 +1,13 @@
 """Reads run-signed evidence from GitHub and checks its Sigstore signature.
 
 Everything GitHub-facing about evidence lives here: the workflow runs and artifacts of a
-governed repository, the commit tree and blobs, the live commit of the signer's tag, the
+governed repository, the commit tree and blobs, the live head of the signer's branch, the
 attestations for a digest, and the Sigstore verification of a bundle. A call that fails, or an
 answer that does not fit the expected shape, raises: nothing is guessed. The signature check
-accepts only the exact signer identity of the pinned workflow, a build signer digest equal to
-the pinned signer commit (a setting; the live tag must still point at it), and the target's
-repository and commit as the run's source.
+accepts only the exact signer identity of the workflow on the trusted branch (main), a build
+signer digest equal to that branch's head read live at verification time, and the target's
+repository and commit as the run's source. Merging into that branch is the trust act; there
+is no grace for an earlier head, so a run signed by an older head is refused naming both.
 
 The run's source commit must be the target commit, so the governed repository's caller
 workflow must run on `push` (under `pull_request`, github.sha is a merge commit and every
@@ -24,6 +25,7 @@ import zipfile
 from collections.abc import Awaitable, Callable
 
 import httpx
+from cryptography import x509
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from sigstore.errors import Error as SigstoreError
 from sigstore.models import Bundle
@@ -149,6 +151,26 @@ def evidence_item(items: list[ArtifactListing], commit: str, run: RunListing) ->
     return found[0]
 
 
+_BUILD_SIGNER_DIGEST_OID = x509.ObjectIdentifier("1.3.6.1.4.1.57264.1.10")
+
+
+def _signed_by_older_head(bundle: Bundle, identity: str, head: str) -> str | None:
+    """The signer commit of a bundle whose workflow identity is right but whose build signer
+    digest is not the branch head, or None when that is not why verification failed."""
+    try:
+        certificate = bundle.signing_certificate
+        names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        uris = names.value.get_values_for_type(x509.UniformResourceIdentifier)
+        raw = certificate.extensions.get_extension_for_oid(_BUILD_SIGNER_DIGEST_OID).value
+        data = raw.value if isinstance(raw, x509.UnrecognizedExtension) else b""
+    except (x509.ExtensionNotFound, ValueError):
+        return None
+    if identity not in uris or len(data) < 2 or data[0] != 0x0C:
+        return None
+    signed = data[2 : 2 + data[1]].decode("ascii", errors="replace")
+    return signed if signed != head else None
+
+
 class AttestationService(BaseInfraService):
     """GitHub's evidence, read with a token the caller supplies, and Sigstore's verdict on it."""
 
@@ -182,27 +204,25 @@ class AttestationService(BaseInfraService):
 
     async def health_check(self) -> bool:
         try:
-            await self.live_tag_commit()
+            await self.signer_head()
         except (AttestationError, EvidenceRefusal, httpx.HTTPError):
             return False
         return True
 
-    async def live_tag_commit(self) -> str:
-        """The commit the signer's tag points at right now, read live; it must equal the pin."""
+    async def signer_head(self) -> str:
+        """The head commit of the signer's branch right now, read live."""
         repo = self._settings.verify_repository
         ref = _Ref.model_validate_json(
-            await self._get_bytes(f"/repos/{repo}/git/ref/tags/{self._settings.signer_tag}")
+            await self._get_bytes(f"/repos/{repo}/git/ref/heads/{self._settings.signer_branch}")
         )
-        sha, kind = ref.object.sha, ref.object.type
-        if kind == "tag":
-            tag = _Ref.model_validate_json(await self._get_bytes(f"/repos/{repo}/git/tags/{sha}"))
-            sha, kind = tag.object.sha, tag.object.type
-        if kind != "commit":
-            raise AttestationError(f"the signer tag does not point at a commit ({kind})")
-        return sha
+        if ref.object.type != "commit":
+            raise AttestationError(
+                f"the signer branch does not point at a commit ({ref.object.type})"
+            )
+        return ref.object.sha
 
     async def signer_tools_digest(self, signer_commit: str) -> str:
-        """VERIFY_TOOLS_DIGEST as written in the signer workflow at the tag's commit."""
+        """VERIFY_TOOLS_DIGEST as written in the signer workflow at the branch head read live."""
         repo = self._settings.verify_repository
         raw = await self._get_bytes(
             f"/repos/{repo}/contents/{self._settings.workflow_path}",
@@ -314,8 +334,18 @@ class AttestationService(BaseInfraService):
         )
         try:
             parsed = Bundle.from_json(json.dumps(bundle))
+        except (SigstoreError, ValueError) as error:
+            raise EvidenceRefusal(f"the Sigstore verification failed: {error}") from error
+        try:
             payload = await asyncio.to_thread(self._verify_dsse, parsed, policy)
         except (SigstoreError, ValueError) as error:
+            older = _signed_by_older_head(parsed, self._settings.signer_identity, signer_commit)
+            if older is not None:
+                shown = older if re.fullmatch(r"[0-9a-f]{40}", older) else "an unrecognised commit"
+                raise EvidenceRefusal(
+                    f"signed by mandate-verify {shown}, "
+                    f"{self._settings.signer_branch} is now {signer_commit}"
+                ) from error
             raise EvidenceRefusal(f"the Sigstore verification failed: {error}") from error
         try:
             statement = json.loads(payload)

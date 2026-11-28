@@ -1,7 +1,7 @@
 {
   "repository": "drivestream-lab/mandate-sandbox-svc",
-  "commit": "4184d82e1407f49558b3f515290bf18ecb7ead9b",
-  "subject_sha256": "599960da0050458506724964f5e40ef5be75b37b4aab78c38c673b9a6af6a5f7",
-  "signer_commit": "73eac8ac292c1e520b2ce4b2e457e823c38c7fb4",
-  "signer_ref": "refs/tags/evidence-1"
+  "commit": "da163312290c2f3632d74ab4cad5fba52c119fe7",
+  "subject_sha256": "e682e2c5a27033f80a9c55ebafae3ea53010687fe2de96a04901efbf0d7e6599",
+  "signer_commit": "6e6baf247f5be343b809a985570cca5d29cf7b56",
+  "signer_ref": "refs/heads/main"
 }

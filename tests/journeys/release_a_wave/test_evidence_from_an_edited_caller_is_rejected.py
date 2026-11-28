@@ -1,11 +1,10 @@
 """Evidence is accepted only when the pinned signer workflow signed it for that commit.
 
 Real runs on mandate-sandbox-svc, real GitHub artifacts and attestations, real Sigstore
-verification: the caller pinned to the signer tag is accepted, a caller that edited its own CI
+verification: the caller of the signer workflow on main is accepted, a caller that edited its own CI
 and signed for itself is refused, a failing run's evidence is refused, a truncated evidence file
 is refused, a validly signed run over an edited protected test is refused (its test set is not
-the one fixed at sign-off), and a signer tag that no longer points at the pinned commit is
-refused.
+the one fixed at sign-off).
 """
 
 import pytest
@@ -17,9 +16,6 @@ from src.configs.evidence_settings import EvidenceSettings
 from src.infra_services.attestation_service import AttestationService
 from src.models.evidence_models import EvidenceRefusal
 from tests.journeys.release_a_wave.conftest import FULL_REPO, EvidenceRun
-
-OTHER_COMMIT = "d3b3d4f52447d4048aee034e0fc65d7d1d8e887c"
-"""A real mandate-verify commit that the signer tag does not point at."""
 
 
 @pytest.mark.req("REQ-60")
@@ -39,7 +35,7 @@ async def test_the_pinned_callers_evidence_is_accepted(
     assert verified.tests > 0
     assert verified.test_set_digest == signed_off_digest
     assert verified.signer_identity == evidence_settings.signer_identity
-    assert verified.signer_digest == evidence_settings.signer_commit
+    assert len(verified.signer_digest) == 40  # mandate-verify main's head, read live
 
 
 @pytest.mark.req("REQ-108")
@@ -66,26 +62,6 @@ async def test_a_signed_run_over_an_edited_protected_test_is_refused(
     with pytest.raises(EvidenceRefusal) as refused:
         await evidence_service.verify(run.target(signed_off_digest))
     assert "fixed at spec sign-off" in refused.value.reason
-
-
-@pytest.mark.req("REQ-108")
-async def test_a_signer_tag_that_moved_is_refused(
-    evidence_runs: dict[str, EvidenceRun],
-    attestations: AttestationService,
-    signed_off_digest: str,
-) -> None:
-    run = evidence_runs["pinned"]
-    moved = AttestationService(
-        attestations._token_provider,  # pyright: ignore[reportPrivateUsage]
-        EvidenceSettings(signer_commit=OTHER_COMMIT),
-    )
-    await moved.initialize()
-    try:
-        with pytest.raises(EvidenceRefusal) as refused:
-            await EvidenceVerificationService(moved).verify(run.target(signed_off_digest))
-    finally:
-        await moved.close()
-    assert "tag moved" in refused.value.reason
 
 
 @pytest.mark.req("REQ-61")
