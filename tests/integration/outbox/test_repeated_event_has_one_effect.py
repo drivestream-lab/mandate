@@ -166,6 +166,7 @@ async def test_the_runtime_role_cannot_edit_or_remove_a_recorded_event(
         assert "permission denied" in str(refusal.value)
 
 
+@pytest.mark.req("REQ-55")
 @pytest.mark.parametrize("offset", [timedelta(days=-400), timedelta(days=400)])
 async def test_a_queued_message_is_due_at_the_services_own_clock(
     postgres: PostgresService, offset: timedelta
