@@ -67,12 +67,14 @@ class PullRequestSnapshot(BaseModel):
 
 
 class OpenPull(BaseModel):
-    """An open pull request and the branch it merges into."""
+    """An open pull request: its branch, head commit and labels, as listed."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ref: PullRequestRef
     base_ref: str
+    head_sha: str = Field(pattern=_SHA)
+    labels: tuple[str, ...] = ()
 
 
 class GateRule(BaseModel):
@@ -145,3 +147,22 @@ class GateDecisionOutcome(BaseModel):
     head_sha: str
     reason: str
     signer: str | None
+
+
+class EscalationNote(BaseModel):
+    """Something the re-check could not settle and a person must look at."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    repo: str
+    number: int | None
+    reason: str
+
+
+class RecheckReport(BaseModel):
+    """What one pass over the open governed pull requests posted and escalated."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    outcomes: tuple[GateDecisionOutcome, ...]
+    escalations: tuple[EscalationNote, ...]

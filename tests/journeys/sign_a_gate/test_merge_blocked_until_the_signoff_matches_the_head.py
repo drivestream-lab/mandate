@@ -12,7 +12,7 @@ from src.infra_services.github_app_service import GitHubAppService
 from src.infra_services.postgres_service import PostgresService
 from src.models.ledger_models import DecisionRecord, LedgerEntryType
 from src.models.signoff_models import GateDecisionStateType
-from tests.journeys.sign_a_gate.conftest import GATE_RULE, SIGNER_LOGIN, SandboxDesk
+from tests.journeys.sign_a_gate.conftest import GATE_RULE, REPO, SIGNER_LOGIN, SandboxDesk
 from tests.journeys.sign_a_gate.support import STAMP, Services
 
 
@@ -111,3 +111,41 @@ async def test_two_checks_racing_on_one_signoff_write_one_decision(
 
     assert all(o.state is GateDecisionStateType.SUCCESS for o in outcomes)
     assert (await services.entry_types()).count(LedgerEntryType.DECISION) == 1
+
+
+@pytest.mark.req("REQ-63")
+async def test_a_stacked_pull_request_does_not_block_the_signed_parent(
+    postgres: PostgresService, github_app: GitHubAppService, sandbox_desk: SandboxDesk
+) -> None:
+    services = Services(postgres)
+    pull = sandbox_desk.open_pull_request("stack-parent")
+    pull.signer_signs()
+    stacked = pull.open_stacked_pull_request("stack-child")
+
+    outcome = await services.check.evaluate_and_post(github_app, pull.ref, GATE_RULE, STAMP)
+
+    assert stacked > 0
+    assert outcome.state is GateDecisionStateType.SUCCESS
+
+
+@pytest.mark.req("REQ-63")
+async def test_recheck_fails_a_signed_pull_request_retargeted_without_a_new_evaluation(
+    postgres: PostgresService, github_app: GitHubAppService, sandbox_desk: SandboxDesk
+) -> None:
+    services = Services(postgres)
+    pull = sandbox_desk.open_pull_request("recheck-retarget")
+    pull.signer_signs()
+    signed = await services.check.evaluate_and_post(github_app, pull.ref, GATE_RULE, STAMP)
+    assert signed.state is GateDecisionStateType.SUCCESS
+    pull.retarget("main")
+    stale = pull.gate_decision()
+    assert stale is not None and stale.state == "success"  # GitHub still shows the old answer
+
+    report = await services.check.recheck_open_gates(github_app, (REPO,), (GATE_RULE,), STAMP)
+
+    posted = pull.gate_decision()
+    assert posted is not None and posted.state == "failure"
+    assert [o for o in report.outcomes if o.head_sha == signed.head_sha][0].state is (
+        GateDecisionStateType.FAILURE
+    )
+    assert not [e for e in report.escalations if e.number == pull.ref.number]

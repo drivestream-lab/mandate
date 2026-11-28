@@ -15,6 +15,7 @@ from jose import jwt
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from src.configs.github_app_settings import GitHubAppSettings
+from src.engine.gates.gate_decision_rules import PAGE_SIZE, next_page
 from src.infra_services.base_infra_service import BaseInfraService
 from src.logging import get_logger
 from src.models.gate_models import PullRequestRef
@@ -32,7 +33,6 @@ logger = get_logger()
 
 _TOKEN_REUSE_SECONDS = 50 * 60
 _STATUS_DESCRIPTION_LIMIT = 140
-_PAGE = 100
 
 
 class GitHubError(Exception):
@@ -83,14 +83,15 @@ class _Review(_Record):
     submitted_at: datetime | None
 
 
-class _CommitPull(_Record):
+class _ListedPull(_Record):
     number: int
-    state: str
     base: _Base
+    head: _Head
+    labels: list[_Label]
 
 
 _REVIEWS = TypeAdapter(list[_Review])
-_COMMIT_PULLS = TypeAdapter(list[_CommitPull])
+_OPEN_PULLS = TypeAdapter(list[_ListedPull])
 
 
 class GitHubAppService(BaseInfraService):
@@ -130,13 +131,13 @@ class GitHubAppService(BaseInfraService):
         reviews: list[_Review] = []
         page = 1
         while True:
-            response = await self._get(f"{base}/reviews", {"per_page": _PAGE, "page": page})
+            response = await self._get(f"{base}/reviews", {"per_page": PAGE_SIZE, "page": page})
             try:
                 batch = _REVIEWS.validate_json(response.content)
             except ValidationError as error:
                 raise GitHubError(f"unexpected reviews answer for {base}") from error
             reviews += batch
-            if len(batch) < _PAGE:
+            if len(batch) < PAGE_SIZE:
                 break
             page += 1
         return PullRequestSnapshot(
@@ -153,18 +154,30 @@ class GitHubAppService(BaseInfraService):
         path = f"/repos/{self._settings.owner}/{ref.repo}/pulls/{ref.number}"
         return self._parse(_Pull, await self._get(path)).head.sha
 
-    async def open_pulls_for_commit(self, repo: str, head_sha: str) -> tuple[OpenPull, ...]:
-        """The open pull requests whose head is this commit."""
-        path = f"/repos/{self._settings.owner}/{repo}/commits/{head_sha}/pulls"
-        try:
-            found = _COMMIT_PULLS.validate_json((await self._get(path)).content)
-        except ValidationError as error:
-            raise GitHubError(f"unexpected answer for {path}") from error
-        return tuple(
-            OpenPull(ref=PullRequestRef(repo=repo, number=item.number), base_ref=item.base.ref)
-            for item in found
-            if item.state == "open"
-        )
+    async def list_open_pulls(self, repo: str, base: str) -> tuple[OpenPull, ...]:
+        """Every open pull request into this branch, fork pull requests included."""
+        path = f"/repos/{self._settings.owner}/{repo}/pulls"
+        found: list[OpenPull] = []
+        page: int | None = 1
+        while page is not None:
+            params: dict[str, int | str] = {
+                "state": "open", "base": base, "per_page": PAGE_SIZE, "page": page,
+            }  # fmt: skip
+            try:
+                batch = _OPEN_PULLS.validate_json((await self._get(path, params)).content)
+            except ValidationError as error:
+                raise GitHubError(f"unexpected answer for {path}") from error
+            found += [
+                OpenPull(
+                    ref=PullRequestRef(repo=repo, number=item.number),
+                    base_ref=item.base.ref,
+                    head_sha=item.head.sha,
+                    labels=tuple(label.name for label in item.labels),
+                )
+                for item in batch
+            ]
+            page = next_page(page, len(batch))
+        return tuple(found)
 
     async def post_gate_decision(
         self, repo: str, head_sha: str, state: GateDecisionStateType, description: str
@@ -213,7 +226,7 @@ class GitHubAppService(BaseInfraService):
         self._token_at = time.monotonic()
         return self._token
 
-    async def _get(self, path: str, params: dict[str, int] | None = None) -> httpx.Response:
+    async def _get(self, path: str, params: dict[str, int | str] | None = None) -> httpx.Response:
         try:
             response = await self._ready().get(
                 path, params=params, headers=_headers(await self._token_for_calls())

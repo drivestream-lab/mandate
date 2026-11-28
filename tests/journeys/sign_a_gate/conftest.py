@@ -147,8 +147,11 @@ class SandboxPullRequest:
         pushed = _Written.model_validate_json(reply.content).commit.sha
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            if self.head_sha() == pushed:
-                return pushed
+            try:
+                if self.head_sha() == pushed:
+                    return pushed
+            except httpx.TransportError:
+                pass  # a network blip while waiting: ask again until the deadline
             time.sleep(1)
         raise TimeoutError("the pull request did not move to the pushed commit")
 
@@ -177,6 +180,33 @@ class SandboxPullRequest:
         """The author changes the pull request's base branch."""
         with _client(self._author) as client:
             client.patch(f"/pulls/{self.ref.number}", json={"base": base}).raise_for_status()
+
+    def open_stacked_pull_request(self, name: str) -> int:
+        """A pull request into develop on top of this branch: its history holds this commit but
+        its head is a later one."""
+        branch = f"{self._branch}-{name}"
+        with _client(self._author) as client:
+            client.post(
+                "/git/refs", json={"ref": f"refs/heads/{branch}", "sha": self.head_sha()}
+            ).raise_for_status()
+            client.put(
+                f"/contents/{name}.txt",
+                json={
+                    "message": f"stacked {name}",
+                    "content": base64.b64encode(name.encode()).decode(),
+                    "branch": branch,
+                },
+            ).raise_for_status()
+            created = _Created.model_validate_json(
+                client.post(
+                    "/pulls",
+                    json={"title": f"[journey] {name}", "head": branch, "base": "develop"},
+                )
+                .raise_for_status()
+                .content
+            )
+        self._extra.append(created.number)
+        return created.number
 
     def open_second_pull_on_same_head(self, name: str) -> int:
         """Another open pull request into develop whose head is this very commit."""
