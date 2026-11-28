@@ -67,14 +67,17 @@ async def test_a_push_after_signoff_applies_revised_posts_failure_and_records_th
 
 
 @pytest.mark.req("REQ-42")
-async def test_a_signed_wave_gate_passes_and_a_push_voids_it_under_the_wave_labels(
+async def test_a_wave_gate_needs_evidence_and_a_push_voids_it_under_the_wave_labels(
     postgres: PostgresService, github_app: GitHubAppService, sandbox_desk: SandboxDesk
 ) -> None:
     services = Services(postgres)
     pull = sandbox_desk.open_pull_request("wave-push-after-signoff")
     pull.signer_signs("wave-accepted")
+    # A wave gate with no evidence configured cannot pass, signed or not; the signoff itself is
+    # still recorded, so a push after it is a void.
     signed = await services.check.evaluate_and_post(github_app, pull.ref, WAVE_RULE, STAMP)
-    assert signed.state is GateDecisionStateType.SUCCESS
+    assert signed.state is GateDecisionStateType.FAILURE
+    assert "needs run-signed evidence" in signed.reason, signed.reason
 
     new_head = pull.author_pushes("after-wave-signoff")
 
