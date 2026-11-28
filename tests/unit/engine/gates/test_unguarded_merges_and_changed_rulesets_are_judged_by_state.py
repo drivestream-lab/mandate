@@ -10,6 +10,7 @@ from src.engine.gates.unguarded_merge_rules import (
     governance_findings,
     judge_merge,
     revert_due,
+    seed_allowed,
     unreadable_ruleset,
     walk_complete,
     checkpoint_reached,
@@ -211,7 +212,9 @@ def test_a_landing_that_is_not_a_merged_pull_request_is_a_breach_even_for_a_name
 @pytest.mark.req("REQ-122")
 def test_the_walk_stops_on_the_checkpoint_or_at_the_depth_and_only_the_checkpoint_counts() -> None:
     assert walk_complete("a", "a", 0, 5) and walk_complete(None, "a", 0, 5)
-    assert walk_complete("b", "a", 5, 5) and not walk_complete("b", "a", 4, 5)
+    assert walk_complete("b", None, 5, 5) and not walk_complete("b", None, 4, 5)
+    # With a checkpoint the walk has no depth limit: 500 landings on, it still goes on.
+    assert not walk_complete("b", "a", 500, 5)
     assert checkpoint_reached("a", "a") and checkpoint_reached("zzz", None)
     assert not checkpoint_reached("b", "a") and not checkpoint_reached(None, "a")
 
@@ -221,3 +224,9 @@ def test_a_breach_is_handled_only_once_its_revert_is_on_record() -> None:
     assert revert_due(revertable=True, revert_recorded=False) is True
     assert revert_due(revertable=True, revert_recorded=True) is False
     assert revert_due(revertable=False, revert_recorded=False) is False
+
+
+@pytest.mark.req("REQ-122")
+def test_a_checkpoint_can_only_be_seeded_where_there_is_none() -> None:
+    assert seed_allowed(None) is True
+    assert seed_allowed("a" * 40) is False

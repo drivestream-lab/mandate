@@ -14,6 +14,7 @@ import pytest
 from src.business_services.release.unguarded_merge_sweep_service import (
     CHECKPOINT_ROLE,
     POLICY_BREACH_ROLE,
+    SEED_ROLE,
     UnguardedMergeSweepService,
 )
 from src.infra_services.github_app_service import GitHubAppService
@@ -49,7 +50,7 @@ async def test_a_ruleset_or_protection_that_differs_from_the_baseline_is_recorde
     sweeper = UnguardedMergeSweepService(services.ledger)
     login = await github_app.app_login()
     for branch in ("develop", "main"):  # start from where the branches are, not from their history
-        await sweeper.record_checkpoint(github_app, SVC, branch, STAMP)
+        await sweeper.seed_checkpoint(github_app, SVC, branch, STAMP)
     live = await live_baseline(github_app, SVC)
     assert live.rulesets, "the sandbox repo has its gate ruleset"
 
@@ -110,6 +111,6 @@ async def test_a_ruleset_or_protection_that_differs_from_the_baseline_is_recorde
         for e in entries
         if e.entry_type == LedgerEntryType.DECISION
     ]
-    assert set(roles) == {POLICY_BREACH_ROLE, CHECKPOINT_ROLE}
+    assert set(roles) == {POLICY_BREACH_ROLE, CHECKPOINT_ROLE, SEED_ROLE}
     assert roles.count(POLICY_BREACH_ROLE) == len(cases) + 1
     assert (await services.ledger.verify()).is_intact

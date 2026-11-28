@@ -40,9 +40,18 @@ url or ending in _url is dropped too). The ruleset's own id is kept in the basel
 
 
 def walk_complete(current: str | None, checkpoint: str | None, steps: int, max_depth: int) -> bool:
-    """True when the first-parent walk should stop: it reached the checkpoint, ran out of
-    parents, or went as deep as the first sweep may."""
-    return current is None or current == checkpoint or steps >= max_depth
+    """True when the first-parent walk should stop: it reached the checkpoint or ran out of
+    parents, or, only for a first sweep that has no checkpoint, went `max_depth` landings back.
+
+    Once a checkpoint exists the walk goes all the way to it, however many landings came in."""
+    if current is None or current == checkpoint:
+        return True
+    return checkpoint is None and steps >= max_depth
+
+
+def seed_allowed(existing_checkpoint: str | None) -> bool:
+    """A checkpoint can only be seeded where there is none; a sweep alone moves it afterwards."""
+    return existing_checkpoint is None
 
 
 def checkpoint_reached(last: str | None, checkpoint: str | None) -> bool:

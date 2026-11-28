@@ -1,20 +1,23 @@
 """Journey: a merge into develop whose head had no passing check is caught and answered.
 
 On mandate-sandbox-meta (no gate ruleset, only Launchpad's branch protection) the author merges a
-pull request without any check, as a person's merger could. One sweep over the merge window finds
-it. With the author named as an emergency human on a repo that is Mandate's own, the merge is the
-recorded exception and is not reverted; with no such human it is a policy breach, recorded once,
-escalated, and answered with a revert pull request, which is signed and merged through the gate so
-the sandbox content is restored.
+pull request without any check, as a person's merger could. The sweep starts from a seeded
+checkpoint (a second seed is refused) and walks the branch's first parents to it. With the author
+named as an emergency human on a repo that is Mandate's own, a merged pull request is the recorded
+exception and is not reverted; with no such human the next merge is a policy breach, recorded once,
+escalated, and answered with a revert pull request. Both are reverted through the gate (signed,
+checked, merged) so the sandbox content is restored.
 """
 
 import asyncio
+
 import pytest
 
 from src.business_services.release.unguarded_merge_sweep_service import (
     EMERGENCY_EXCEPTION_ROLE,
     POLICY_BREACH_ROLE,
     REVERT_ROLE,
+    CheckpointExistsError,
     UnguardedMergeSweepService,
 )
 from src.infra_services.github_app_service import GitHubAppService
@@ -59,23 +62,13 @@ async def test_a_merge_without_a_passing_check_is_recorded_escalated_and_reverte
     run_namespace: RunNamespace,
 ) -> None:
     services = Services(postgres)
-    file_name = f"unguarded-{run_namespace.run_id}"
     sweeper = UnguardedMergeSweepService(services.ledger)
     app_login = await github_app.app_login()
-    before = await sweeper.record_checkpoint(github_app, META, "develop", STAMP)
-    await sweeper.record_checkpoint(github_app, META, "main", STAMP)
-    branch = sandbox_github.create_branch(META, file_name)
-    pull = open_pull(
-        META,
-        branch,
-        author_token,
-        signer_token,
-        mandate_token,
-        "[journey] unguarded",
-        False,
-        file_name,
-    )
-    merge_commit = pull.author_merges(pull.head_sha())
+    for branch in ("develop", "main"):
+        seeded = await sweeper.seed_checkpoint(github_app, META, branch, STAMP)
+        assert "taken as given" in seeded.reason
+        with pytest.raises(CheckpointExistsError):  # only a sweep moves a checkpoint
+            await sweeper.seed_checkpoint(github_app, META, branch, STAMP)
     baseline = await live_baseline(github_app, META)
 
     def config(humans: frozenset[str]) -> SweepConfig:
@@ -87,56 +80,79 @@ async def test_a_merge_without_a_passing_check_is_recorded_escalated_and_reverte
             baselines=(baseline,),
         )
 
-    await _wait_until_listed(github_app, merge_commit)
+    async def merge_without_a_check(name: str) -> tuple[SandboxPull, str]:
+        file_name = f"{name}-{run_namespace.run_id}"
+        branch = sandbox_github.create_branch(META, file_name)
+        pull = open_pull(
+            META,
+            branch,
+            author_token,
+            signer_token,
+            mandate_token,
+            f"[journey] {name}",
+            False,
+            file_name,
+        )
+        merge_commit = pull.author_merges(pull.head_sha())
+        await _wait_until_listed(github_app, merge_commit)
+        return pull, merge_commit
+
+    async def revert_through_the_gate(revert_number: int, file_name: str) -> None:
+        revert = SandboxPull(META, revert_number, "", author_token, signer_token, mandate_token)
+        try:
+            assert pull_state(META, mandate_token, revert_number) == "open"
+            signed_head = revert.signer_signs(GATE_RULE.label)
+            outcome = await services.check.evaluate_and_post(
+                github_app, revert.ref, GATE_RULE, STAMP
+            )
+            assert outcome.state is GateDecisionStateType.SUCCESS, outcome.reason
+            await github_app.merge_pull(revert.ref, signed_head)
+            assert pull_state(META, mandate_token, revert_number) == "merged"
+            assert not file_exists(META, mandate_token, f"{file_name}.txt", "develop")
+        finally:
+            revert.close()
 
     # A named emergency human on Mandate's own repo, merging a pull request: the recorded
     # exception, escalated, not reverted.
+    _, first_commit = await merge_without_a_check("emergency")
     exception = await sweeper.sweep(github_app, config(frozenset({AUTHOR_LOGIN})), STAMP)
-    seen = [f for f in exception.findings if f.subject == merge_commit]
+    seen = [f for f in exception.findings if f.subject == first_commit]
     assert [f.kind for f in seen] == [BreachKindType.EMERGENCY_MERGE]
-    assert AUTHOR_LOGIN in seen[0].detail and merge_commit in seen[0].detail
-    assert any(e.subject == merge_commit for e in exception.escalations)
+    assert AUTHOR_LOGIN in seen[0].detail and first_commit in seen[0].detail
+    assert any(e.subject == first_commit for e in exception.escalations)
     assert not exception.reverts
     assert len(exception.limits) == 1
-    assert await _recorded(services, EMERGENCY_EXCEPTION_ROLE, merge_commit) == 1
-    assert pull_state(META, mandate_token, pull.ref.number) == "merged"
-
-    # With nobody named, the same merge is a breach: recorded, escalated and reverted. (The
-    # checkpoint is put back before the merge, as if the earlier sweep had not run.)
-    await sweeper.record_checkpoint(github_app, META, "develop", STAMP, before)
-    report = await sweeper.sweep(github_app, config(frozenset()), STAMP)
-    breach = [f for f in report.findings if f.subject == merge_commit]
-    assert [f.kind for f in breach] == [BreachKindType.UNGUARDED_MERGE]
-    assert any(e.subject == merge_commit for e in report.escalations)
-    reverts = [x for x in report.reverts if x.reverted_pull == pull.ref.number]
-    assert len(reverts) == 1
-    assert await _recorded(services, POLICY_BREACH_ROLE, merge_commit) == 1
-    assert await _recorded(services, REVERT_ROLE, merge_commit) == 1
-
-    # Swept again over the same landings: already recorded, and its revert is on record, so
-    # nothing is recorded, escalated or reverted a second time.
-    await sweeper.record_checkpoint(github_app, META, "develop", STAMP, before)
-    again = await sweeper.sweep(github_app, config(frozenset()), STAMP)
-    assert not [f for f in again.findings if f.subject == merge_commit]
-    assert not [x for x in again.reverts if x.reverted_pull == pull.ref.number]
-
-    # The revert goes through the gate like any other pull request, then restores the content.
-    revert = SandboxPull(
-        META, reverts[0].revert_pull, "", author_token, signer_token, mandate_token
+    assert await _recorded(services, EMERGENCY_EXCEPTION_ROLE, first_commit) == 1
+    # Not reverted by the sweep; the journey restores the sandbox through the gate itself.
+    node = (await github_app.merged_pulls_with_commits(META, "develop", frozenset({first_commit})))[
+        0
+    ]
+    await revert_through_the_gate(
+        await github_app.open_revert_pull(node.node_id), f"emergency-{run_namespace.run_id}"
     )
-    try:
-        assert pull_state(META, mandate_token, revert.ref.number) == "open"
-        signed_head = revert.signer_signs(GATE_RULE.label)
-        outcome = await services.check.evaluate_and_post(github_app, revert.ref, GATE_RULE, STAMP)
-        assert outcome.state is GateDecisionStateType.SUCCESS, outcome.reason
-        reverted = await github_app.merge_pull(revert.ref, signed_head)
-        assert pull_state(META, mandate_token, revert.ref.number) == "merged"
-        assert not file_exists(META, mandate_token, f"{file_name}.txt", "develop")
-        # The revert's merge passed the check, so a sweep over it finds nothing to record.
-        after = await sweeper.sweep(github_app, config(frozenset()), STAMP)
-        assert not [f for f in after.findings if f.subject == reverted]
-    finally:
-        revert.close()
+
+    # With nobody named, the next merge without a check is a breach: recorded, escalated and
+    # reverted by the sweep.
+    second, second_commit = await merge_without_a_check("unguarded")
+    report = await sweeper.sweep(github_app, config(frozenset()), STAMP)
+    breach = [f for f in report.findings if f.subject == second_commit]
+    assert [f.kind for f in breach] == [BreachKindType.UNGUARDED_MERGE]
+    assert any(e.subject == second_commit for e in report.escalations)
+    reverts = [x for x in report.reverts if x.reverted_pull == second.ref.number]
+    assert len(reverts) == 1
+    assert await _recorded(services, POLICY_BREACH_ROLE, second_commit) == 1
+    assert await _recorded(services, REVERT_ROLE, second_commit) == 1
+    # The revert of the first merge, merged through the gate, is not a finding.
+    assert not [f for f in report.findings if f.subject not in {second_commit}]
+
+    # The sweep moved its checkpoint: a second sweep finds nothing and opens nothing.
+    again = await sweeper.sweep(github_app, config(frozenset()), STAMP)
+    assert again.findings == () and again.reverts == ()
+
+    # The sweep's revert goes through the gate like any other pull request.
+    await revert_through_the_gate(reverts[0].revert_pull, f"unguarded-{run_namespace.run_id}")
+    after = await sweeper.sweep(github_app, config(frozenset()), STAMP)
+    assert after.findings == ()
     assert (await services.ledger.verify()).is_intact
 
 

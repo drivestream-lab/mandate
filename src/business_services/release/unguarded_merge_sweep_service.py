@@ -3,7 +3,7 @@ check, and gate rulesets or branch protection that are not what a decided Launch
 
 Landings. Each of develop and main is walked from its current tip back through first parents
 to the tip the previous sweep recorded in the ledger (the checkpoint, written by Mandate); the
-first sweep has none and goes back as far as `max_depth` landings. Commit dates are never used.
+first sweep has none and goes back as far as `max_depth` landings; once there is one, the walk goes all the way to it. Commit dates are never used.
 A landing that is a merged pull request's merge commit is judged on the head that was merged: the
 newest mandate/gate-decision at or before GitHub's merge time must be a success posted by
 Mandate's App. A landing that is not (a push, or a rebase merge) is a breach whatever statuses it
@@ -37,6 +37,7 @@ from pydantic import JsonValue
 
 from src.business_services.base_business_service import BaseBusinessService
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
+from src.exceptions.app_exceptions import BaseAppException
 from src.engine.gates.unguarded_merge_rules import (
     BYPASS_LIMIT,
     breach_reason,
@@ -46,6 +47,7 @@ from src.engine.gates.unguarded_merge_rules import (
     judge_merge,
     protection_digest,
     revert_due,
+    seed_allowed,
     ruleset_digest,
     walk_complete,
 )
@@ -71,6 +73,7 @@ from src.models.sweep_models import (
 POLICY_BREACH_ROLE = "policy-breach"
 EMERGENCY_EXCEPTION_ROLE = "emergency-exception"
 CHECKPOINT_ROLE = "sweep-checkpoint"
+SEED_ROLE = "sweep-seed"
 REVERT_ROLE = "revert-opened"
 _WORKFLOW_VERSION = "unguarded-merge-sweep/1"
 _RULES_VERSION = "mandate-rules"
@@ -95,6 +98,17 @@ class SweepGitHub(Protocol):
     async def read_branch_protection(self, repo: str, branch: str) -> JsonValue: ...
 
     async def open_revert_pull(self, node_id: str) -> int: ...
+
+
+class CheckpointExistsError(BaseAppException):
+    """A checkpoint cannot be seeded where one exists: only a sweep moves it."""
+
+    def __init__(self, repo: str, branch: str) -> None:
+        super().__init__(
+            code="SWEEP_CHECKPOINT_EXISTS",
+            message=f"{repo} {branch} already has a checkpoint; only a sweep moves it",
+            status_code=409,
+        )
 
 
 class _Found:
@@ -132,19 +146,25 @@ class UnguardedMergeSweepService(BaseBusinessService):
             limits=tuple(found.limits),
         )
 
-    async def record_checkpoint(
-        self,
-        github: SweepGitHub,
-        repo: str,
-        branch: str,
-        stamp: VersionStamp,
-        tip: str | None = None,
-    ) -> str:
-        """Start sweeping from this commit, or the branch's tip as it is now (what a previous
-        sweep would have left). Returns the commit recorded."""
-        tip = tip or await github.read_branch_tip(repo, branch)
+    async def seed_checkpoint(
+        self, github: SweepGitHub, repo: str, branch: str, stamp: VersionStamp
+    ) -> SweepEscalation:
+        """Start judging from the branch's tip as it is now: everything before it is taken as
+        given. Allowed only where no checkpoint exists, recorded under Mandate's actor and
+        escalated to the owner, since it means "start judging here". Afterwards only a sweep that
+        answered every landing moves the checkpoint."""
+        existing = await self._ledger.latest_choice(
+            MANDATE_ACTOR, CHECKPOINT_ROLE, _checkpoint_target(repo, branch)
+        )
+        if not seed_allowed(existing):
+            raise CheckpointExistsError(repo, branch)
+        tip = await github.read_branch_tip(repo, branch)
+        reason = f"{repo} {branch} is judged from {tip}; everything before it is taken as given"
+        await self._write(SEED_ROLE, f"{repo}/{branch}@{tip}", "seeded", reason, stamp)
         await self._write_checkpoint(repo, branch, tip, stamp)
-        return tip
+        found = _Found()
+        self._escalate(found, repo, f"{branch} checkpoint seeded", reason)
+        return found.escalations[0]
 
     async def _sweep_branch(
         self,
@@ -170,18 +190,18 @@ class UnguardedMergeSweepService(BaseBusinessService):
         landed = [commit.sha for commit in line]
         complete = True
         if not checkpoint_reached(stopped, checkpoint):
-            reason = (
-                f"{branch} no longer leads to the checkpoint {checkpoint}: it was rewritten, or "
-                f"more than {config.max_depth} landings came in since the last sweep"
-            )
-            complete = await self._record_unrevertable(
+            # The branch's own line does not lead to the checkpoint: it was rewritten. Record and
+            # escalate it; the walk's landings are not the branch's history, and the checkpoint
+            # stays where it is until the owner has dealt with it.
+            await self._record_unrevertable(
                 found,
                 repo,
                 f"{branch} rewritten@{tip[:12]}",
                 BreachKindType.REWRITTEN_BRANCH,
-                reason,
+                f"{branch} no longer leads to the checkpoint {checkpoint}: it was rewritten",
                 stamp,
             )
+            return
         try:
             pulls = {
                 pull.merge_commit_sha: pull

@@ -31,7 +31,9 @@ from src.engine.gates.merge_rules import (
     mandate_merges,
     merge_decision_role,
     signoff_problem,
+    void_after_decision,
 )
+from src.engine.gates.voiding_rules import revised_role, stale_role
 from src.infra_services.github_app_service import GitHubError
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
@@ -40,6 +42,7 @@ from src.models.signoff_models import (
     DecisionLink,
     GateDecisionOutcome,
     GateDecisionStateType,
+    MANDATE_ACTOR,
     GateRule,
 )
 
@@ -117,8 +120,20 @@ class MergeService(BaseBusinessService):
             rule.deciding_role, merge_decision_role(rule, ref), snapshot.head_sha
         )
         attestation = decided_attestation(record)
-        if isinstance(attestation, str):
-            return MergeOutcome(state=MergeStateType.NOT_SIGNED, reason=attestation)
+        if isinstance(attestation, str) or record is None:
+            return MergeOutcome(
+                state=MergeStateType.NOT_SIGNED,
+                reason=attestation if isinstance(attestation, str) else "no decision",
+            )
+        voided = void_after_decision(
+            record,
+            [
+                await self._ledger.latest_decision_record(MANDATE_ACTOR, role, snapshot.head_sha)
+                for role in (revised_role(rule), stale_role(rule))
+            ],
+        )
+        if voided is not None:
+            return MergeOutcome(state=MergeStateType.NOT_SIGNED, reason=voided)
         problem = signoff_problem(snapshot, rule, attestation)
         if problem is not None:
             return MergeOutcome(state=MergeStateType.NOT_SIGNED, reason=problem)

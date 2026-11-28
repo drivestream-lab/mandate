@@ -20,6 +20,7 @@ from src.engine.gates.merge_rules import (
     mandate_merges,
     merge_decision_record,
     signoff_problem,
+    void_after_decision,
 )
 from src.engine.gates.signoff_rules import read_attestation
 from src.models.gate_models import PullRequestRef
@@ -128,3 +129,14 @@ def test_an_attestation_that_does_not_match_its_digest_is_not_signed() -> None:
     swapped = record.evidence[0].model_copy(update={"digest": "0" * 64})
     refused = decided_attestation(record.model_copy(update={"evidence": (swapped,)}))
     assert isinstance(refused, str) and "digest" in refused
+
+
+@pytest.mark.req("REQ-63")
+def test_a_void_recorded_after_the_decision_ends_it_and_an_earlier_one_does_not() -> None:
+    decision = _decided(APPROVE_CHOICE)
+    later = decision.model_copy(update={"decided_at": datetime(2026, 11, 29, tzinfo=UTC)})
+    earlier = decision.model_copy(update={"decided_at": datetime(2026, 11, 27, tzinfo=UTC)})
+    assert void_after_decision(decision, [None, None]) is None
+    assert void_after_decision(decision, [earlier, None]) is None
+    reason = void_after_decision(decision, [None, later])
+    assert reason is not None and "decide again" in reason

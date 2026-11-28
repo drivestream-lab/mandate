@@ -317,7 +317,7 @@ class GateDecisionCheckService(BaseBusinessService):
         A refusal names its reason; any other fault propagates and fails the check on the head.
         """
         if scope.wave is None or rule.label not in scope.wave.specs:
-            if rule.wave:
+            if rule.is_wave:
                 return wave_without_evidence(head, rule), None
             return None, None
         spec = scope.wave.specs[rule.label]

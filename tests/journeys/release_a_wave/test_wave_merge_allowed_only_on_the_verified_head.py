@@ -41,6 +41,7 @@ from tests.journeys.sign_a_gate.support import STAMP, Services
 SVC = "mandate-sandbox-svc"
 META = "mandate-sandbox-meta"
 GATE = "wave-accepted"
+MERGE_GATE = "spec-lgtm"
 _L2 = GateRule(
     label=GATE, branch="develop", rung=RungType.L2, holders=frozenset({SIGNER_LOGIN}), wave=True
 )
@@ -145,7 +146,7 @@ async def test_at_l2_mandates_app_applies_the_signoff_and_merges_at_the_verified
     services = Services(postgres)
     app_login = await github_app.app_login()
     rule = GateRule(
-        label=GATE,
+        label=MERGE_GATE,
         branch="develop",
         rung=RungType.L2,
         holders=frozenset({app_login}),
@@ -170,7 +171,7 @@ async def test_at_l2_mandates_app_applies_the_signoff_and_merges_at_the_verified
             return Attestation(
                 initiative="INIT-JOURNEY",
                 head=head,
-                gate=GATE,
+                gate=MERGE_GATE,
                 repo=META,
                 pull_request=pull.ref.number,
                 digests=("c" * 64,),
@@ -205,5 +206,72 @@ async def test_at_l2_mandates_app_applies_the_signoff_and_merges_at_the_verified
         assert pull_state(META, mandate_token, pull.ref.number) == "merged"
         assert moved in commit_parents(META, mandate_token, outcome.merge_commit or "")
         assert (await services.ledger.verify()).is_intact
+    finally:
+        pull.close()
+
+
+@pytest.mark.req("REQ-63")
+@pytest.mark.req("REQ-42")
+async def test_a_void_after_the_deciding_roles_decision_is_not_revived_by_a_head_that_returns(
+    postgres: PostgresService,
+    github_app: GitHubAppService,
+    sandbox_github: SandboxGitHub,
+    author_token: str,
+    signer_token: str,
+    mandate_token: str,
+) -> None:
+    services = Services(postgres)
+    app_login = await github_app.app_login()
+    plain = GateRule(
+        label=MERGE_GATE,
+        branch="develop",
+        rung=RungType.L2,
+        holders=frozenset({app_login, SIGNER_LOGIN}),
+        deciding_role="journey-deciding-role",
+    )
+    branch = sandbox_github.create_branch(META, "no-revival")
+    pull = open_pull(
+        META,
+        branch,
+        author_token,
+        signer_token,
+        mandate_token,
+        "[journey] no revival",
+        True,
+        "no-revival",
+    )
+    try:
+        a_head = pull.head_sha()
+        attestation = Attestation(
+            initiative="INIT-JOURNEY",
+            head=a_head,
+            gate=plain.label,
+            repo=META,
+            pull_request=pull.ref.number,
+            digests=("c" * 64,),
+            artifact_paths=("journey.txt",),
+        )
+        decision = merge_decision_record(
+            plain, pull.ref, attestation, APPROVE_CHOICE, datetime.now(UTC)
+        )
+        await services.ledger.append_decision(decision, STAMP)
+
+        # The holder signs A and the check records the signoff; then B is pushed and the check
+        # voids it. The void is recorded after the deciding role's decision.
+        pull.signer_signs(plain.label)
+        signed = await services.check.evaluate_and_post(github_app, pull.ref, plain, STAMP)
+        assert signed.state is GateDecisionStateType.SUCCESS, signed.reason
+        pull.author_pushes("no-revival-b")
+        voided = await services.check.evaluate_and_post(github_app, pull.ref, plain, STAMP)
+        assert voided.state is GateDecisionStateType.FAILURE
+
+        # The branch goes back to A. The decision on A is older than the void, so Mandate's App
+        # applies and merges nothing until the deciding role decides again.
+        pull.author_force_pushes_to(a_head)
+        merges = MergeService(services.check, services.ledger)
+        refused = await merges.settle(github_app, pull.ref, plain, STAMP)
+        assert refused.state is MergeStateType.NOT_SIGNED, refused.reason
+        assert "voided after the deciding role decided" in refused.reason
+        assert pull_state(META, mandate_token, pull.ref.number) == "open"
     finally:
         pull.close()

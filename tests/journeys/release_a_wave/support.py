@@ -124,6 +124,19 @@ class SandboxPull:
             time.sleep(1)
         raise TimeoutError("the pull request did not move to the pushed commit")
 
+    def author_force_pushes_to(self, sha: str) -> None:
+        """The author moves the branch back to a commit it had before."""
+        with client(self.repo, self._author) as http:
+            http.patch(
+                f"/git/refs/heads/{self.branch}", json={"sha": sha, "force": True}
+            ).raise_for_status()
+        deadline = time.monotonic() + VISIBLE_SECONDS
+        while time.monotonic() < deadline:
+            if self.head_sha() == sha:
+                return
+            time.sleep(1)
+        raise TimeoutError("the pull request did not move back to the commit")
+
     def signer_signs(self, gate: str) -> str:
         """Label, Approve with the attestation, ready; returns the head signed."""
         head = self.head_sha()

@@ -7,6 +7,7 @@ request ready) and merges the exact commit the check passed on.
 """
 
 import hashlib
+from collections.abc import Sequence
 from datetime import datetime
 
 import yaml
@@ -129,3 +130,20 @@ def decided_attestation(record: DecisionRecord | None) -> Attestation | str:
         return Attestation.model_validate_json(text)
     except ValidationError:
         return "the attestation in the deciding role's decision is not readable"
+
+
+def void_after_decision(
+    decision: DecisionRecord, voids: Sequence[DecisionRecord | None]
+) -> str | None:
+    """Why the deciding role's decision no longer stands, or None.
+
+    A void Mandate recorded for this gate and head after the decision ended it, even if the head
+    has since come back (a force-push to the decided commit): the deciding role must decide again.
+    """
+    for void in voids:
+        if void is not None and void.decided_at > decision.decided_at:
+            return (
+                "the signoff on this head was voided after the deciding role decided; "
+                "the deciding role must decide again"
+            )
+    return None

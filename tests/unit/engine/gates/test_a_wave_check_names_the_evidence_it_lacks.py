@@ -51,3 +51,14 @@ def test_a_wave_gate_checked_without_evidence_settings_fails() -> None:
     outcome = wave_without_evidence(_HEAD, rule)
     assert outcome.state is GateDecisionStateType.FAILURE
     assert "wave gate" in outcome.reason and "none is configured" in outcome.reason
+
+
+@pytest.mark.req("REQ-63")
+def test_the_wave_accepted_label_makes_a_wave_gate_whatever_the_rule_says() -> None:
+    plain = GateRule(
+        label="wave-accepted", branch="develop", rung=RungType.L2, holders=frozenset({"h"})
+    )
+    other = GateRule(
+        label="spec-lgtm", branch="develop", rung=RungType.L2, holders=frozenset({"h"})
+    )
+    assert plain.is_wave is True and other.is_wave is False
