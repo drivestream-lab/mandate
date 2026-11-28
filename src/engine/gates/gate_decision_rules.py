@@ -148,3 +148,26 @@ def withdrawal_after_fault(posted: GateDecisionOutcome, error_name: str) -> Gate
     return failure(
         posted.head_sha, f"the signoff no longer holds: it could not be read again ({error_name})"
     )
+
+
+def evidence_failure(head_sha: str, reason: str) -> GateDecisionOutcome:
+    """Failure for a wave whose head has no accepted run-signed evidence."""
+    return failure(head_sha, f"no run-signed evidence for this head: {reason}")
+
+
+def evidence_repository_failure(
+    head_sha: str, repository: str, repo: str
+) -> GateDecisionOutcome | None:
+    """Failure when the evidence the caller named is for another repository than the pull request."""
+    if repository.rsplit("/", 1)[-1] == repo:
+        return None
+    return failure(head_sha, f"the evidence is configured for {repository}, not {repo}")
+
+
+def with_evidence(
+    outcome: GateDecisionOutcome, tests: int, run_id: int, run_attempt: int
+) -> GateDecisionOutcome:
+    """A success that also names the run-signed evidence it relied on."""
+    return outcome.model_copy(
+        update={"reason": f"{outcome.reason}; evidence run {run_id}.{run_attempt} ({tests} tests)"}
+    )

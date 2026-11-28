@@ -5,7 +5,8 @@ request merges into the gate's own branch, no other open pull request into a gov
 has this commit as its head, the signer holds the gate at its rung and the signer's decision
 is in the ledger. Anything else posts failure with the reason. Once the head is known, an
 error of any kind posts failure on that head rather than leaving an earlier answer standing.
-A head that moved after signoff, or an upstream pull request that changed after it, voids the
+For a wave gate the check also needs run-signed evidence for that exact head (the caller
+supplies what the evidence must match). A head that moved after signoff, or an upstream pull request that changed after it, voids the
 signoff in the ledger (the -revised and -stale labels only show it), and a recorded no on a linked
 artifact fails the next merge downstream of it. After success the signoff is read again, and a signoff that no longer holds is answered with
 failure. What to post is decided by the pure rules in src/engine/gates; this service reads
@@ -17,7 +18,7 @@ without waiting for the pull request's own events. It is called on a schedule by
 that runs Mandate's polling; nothing schedules it yet.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import NamedTuple, Protocol
 
 from injector import inject
@@ -33,6 +34,9 @@ from src.engine.gates.gate_decision_rules import (
     failure_after_fault,
     ambiguous_gate,
     choose_rule,
+    evidence_failure,
+    evidence_repository_failure,
+    with_evidence,
     more_than_one_gate_label,
     not_recorded_for_recheck,
     outcome_after_recording,
@@ -43,6 +47,12 @@ from src.engine.gates.gate_decision_rules import (
 )
 from src.exceptions.app_exceptions import BaseAppException
 from src.logging import get_logger
+from src.models.evidence_models import (
+    EvidenceRefusal,
+    EvidenceTarget,
+    VerifiedEvidence,
+    WaveEvidenceSpec,
+)
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
 from src.models.signoff_models import (
@@ -61,12 +71,27 @@ from src.models.signoff_models import (
 logger = get_logger()
 
 
+class EvidenceChecker(Protocol):
+    """Accepts run-signed evidence for a commit or refuses it."""
+
+    async def verify(self, target: EvidenceTarget) -> VerifiedEvidence: ...
+
+
+class WaveEvidence(NamedTuple):
+    """The gates that are waves, by label, with what the caller fixed about each one's evidence
+    (from the recorded spec signoff, never from the commit under test), and who checks it."""
+
+    checker: EvidenceChecker
+    specs: Mapping[str, WaveEvidenceSpec]
+
+
 class _Scope(NamedTuple):
-    """What an evaluation knows beyond the pull request: the gates, and the links."""
+    """What an evaluation knows beyond the pull request: the gates, the links and the evidence."""
 
     rules: Sequence[GateRule]
     links: tuple[ArtifactLink, ...]
     decision_links: tuple[DecisionLink, ...]
+    wave: WaveEvidence | None = None
 
 
 class GitHubGateClient(PullRequestReader, LabelClient, Protocol):
@@ -110,14 +135,17 @@ class GateDecisionCheckService(BaseBusinessService):
         all_rules: Sequence[GateRule] = (),
         links: Sequence[ArtifactLink] = (),
         decision_links: Sequence[DecisionLink] = (),
+        wave: WaveEvidence | None = None,
     ) -> GateDecisionOutcome:
         """Decide pass or fail by the rule, record the signoff, post on the head.
 
         `all_rules` are the gates configured for the repo; a pull request that carries the
         labels of two gates of its branch fails. `links` name the pull requests upstream of
-        this one, and `decision_links` the artifacts whose recorded no fails this merge.
+        this one, and `decision_links` the artifacts whose recorded no fails this merge. For a
+        gate named in `wave` the check also needs run-signed evidence for this exact head, read
+        again on every evaluation, so a head that moved fails until its own evidence is there.
         """
-        scope = _Scope(all_rules or (rule,), tuple(links), tuple(decision_links))
+        scope = _Scope(all_rules or (rule,), tuple(links), tuple(decision_links), wave)
         return await self._evaluate(github, ref, rule, stamp, scope, True)
 
     async def _evaluate(
@@ -151,6 +179,7 @@ class GateDecisionCheckService(BaseBusinessService):
         stamp: VersionStamp,
         links: Sequence[ArtifactLink] = (),
         decision_links: Sequence[DecisionLink] = (),
+        wave: WaveEvidence | None = None,
     ) -> RecheckReport:
         """Re-evaluate every open pull request into a governed branch of these repos.
 
@@ -177,7 +206,7 @@ class GateDecisionCheckService(BaseBusinessService):
                     await self._recheck_one(
                         github,
                         pull,
-                        _Scope(tuple(rules), tuple(links), tuple(decision_links)),
+                        _Scope(tuple(rules), tuple(links), tuple(decision_links), wave),
                         stamp,
                         outcomes,
                         escalations,
@@ -260,8 +289,32 @@ class GateDecisionCheckService(BaseBusinessService):
         unresolved = await self._voiding.unresolved_no_failure(github, ref, scope.decision_links)
         if unresolved is not None:
             return failure(head, unresolved)
+        passed = outcome_after_recording(head, rule, signoff, recorded)
+        wave_refusal, verified = await self._wave_evidence(scope, ref, rule, head)
+        if wave_refusal is not None:
+            return wave_refusal
         await self._voiding.clear_labels(github, snapshot, rule)
-        return outcome_after_recording(head, rule, signoff, recorded)
+        if verified is None:
+            return passed
+        return with_evidence(passed, verified.tests, verified.run_id, verified.run_attempt)
+
+    async def _wave_evidence(
+        self, scope: _Scope, ref: PullRequestRef, rule: GateRule, head: str
+    ) -> tuple[GateDecisionOutcome | None, VerifiedEvidence | None]:
+        """For a wave gate: the failure to post, or the evidence accepted for this exact head.
+
+        A refusal names its reason; any other fault propagates and fails the check on the head.
+        """
+        if scope.wave is None or rule.label not in scope.wave.specs:
+            return None, None
+        spec = scope.wave.specs[rule.label]
+        elsewhere = evidence_repository_failure(head, spec.repository, ref.repo)
+        if elsewhere is not None:
+            return elsewhere, None
+        try:
+            return None, await scope.wave.checker.verify(spec.target_for(head))
+        except EvidenceRefusal as refusal:
+            return evidence_failure(head, refusal.reason), None
 
     async def _confirm_still_holds(
         self,

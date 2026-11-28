@@ -26,7 +26,14 @@ from src.business_services.release.evidence_verification_service import (
 from src.configs.evidence_settings import EvidenceSettings
 from src.infra_services.attestation_service import AttestationService
 from src.models.evidence_models import EvidenceTarget
+from tests.journeys.decide_blind_first.test_call_sealed_before_the_holder_sees_the_decision import (
+    app_postgres,
+    throwaway_database,
+)
 from tests.journeys.journey_support import SANDBOX_REPOS, AppCredentials, RunNamespace
+from tests.journeys.sign_a_gate.conftest import github_app, mandate_token, signer_token
+
+__all__ = ["app_postgres", "github_app", "mandate_token", "signer_token", "throwaway_database"]
 
 OWNER = "drivestream-lab"
 REPO = "mandate-sandbox-svc"
@@ -215,6 +222,43 @@ class _Pusher:
                     return ",".join(sorted(run.conclusion or "none" for run in runs))
                 time.sleep(10)
         raise TimeoutError(f"the run for {commit} did not finish in {_RUN_TIMEOUT_SECONDS}s")
+
+
+@dataclass(frozen=True)
+class WaveBranch:
+    """A branch with a change and a caller workflow pushed on top, and the commit it ends at."""
+
+    branch: str
+    workflow: str
+    head: str
+
+
+class WaveBuilder:
+    """Pushes wave branches and waits for their runs, as the author."""
+
+    def __init__(self, pusher: _Pusher, signer_tag: str) -> None:
+        self._pusher = pusher
+        self._tag = signer_tag
+
+    def wave_branch(self, name: str) -> WaveBranch:
+        branch = self._pusher.branch_from_develop(name)
+        self._pusher.commit_file(branch, f"{name}.txt", name)
+        workflow = f".github/workflows/{name}.yml"
+        head = self._pusher.commit_file(branch, workflow, _caller(name, branch, self._tag))
+        return WaveBranch(branch, workflow, head)
+
+    def wait_for_run(self, commit: str) -> str:
+        return self._pusher.wait_for_run(commit)
+
+    def push_file(self, branch: str, path: str, text: str) -> str:
+        return self._pusher.commit_file(branch, path, text)
+
+
+@pytest.fixture
+def wave_builder(
+    author_token: str, run_namespace: RunNamespace, evidence_settings: EvidenceSettings
+) -> WaveBuilder:
+    return WaveBuilder(_Pusher(author_token, run_namespace), evidence_settings.signer_tag)
 
 
 @pytest.fixture(scope="session")
