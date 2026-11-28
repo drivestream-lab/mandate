@@ -18,6 +18,12 @@ class EvidenceSettings(BaseSettings):
     verify_repository: str = Field(
         default="drivestream-lab/mandate-verify", pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
     )
+    signer_repository_id: int = Field(
+        default=1464007445,
+        gt=0,
+        description="The numeric id of the signer repository; every read goes by id, and the "
+        "name at that id must be verify_repository",
+    )
     workflow_path: str = Field(default=".github/workflows/verify.yml", min_length=1)
     signer_ref: str = Field(
         default="refs/heads/main",

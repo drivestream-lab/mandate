@@ -8,6 +8,9 @@ accepts only the exact signer identity of the workflow on the trusted branch (ma
 signer digest equal to that branch's head read live at verification time, and the target's
 repository and commit as the run's source. Merging into that branch is the trust act; there
 is no grace for an earlier head, so a run signed by an older head is refused naming both.
+The signer repository is addressed by its numeric id (a setting): the name at that id must
+still be the signer repository, and the trusted branch must carry the update, deletion and
+non-fast-forward rules on every verification, or evidence is refused.
 
 The run's source commit must be the target commit, so the governed repository's caller
 workflow must run on `push` (under `pull_request`, github.sha is a merge commit and every
@@ -58,6 +61,15 @@ class AttestationError(Exception):
 
 class _Record(BaseModel):
     model_config = ConfigDict(extra="ignore")
+
+
+class _Repository(_Record):
+    id: int
+    full_name: str
+
+
+class _Rule(_Record):
+    type: str
 
 
 class _Object(_Record):
@@ -151,6 +163,22 @@ def evidence_item(items: list[ArtifactListing], commit: str, run: RunListing) ->
     return found[0]
 
 
+REQUIRED_BRANCH_RULES = ("update", "deletion", "non_fast_forward")
+"""The rules that make a signer branch the trust root: nobody may rewrite, delete or rewind it."""
+
+
+def repository_name_gap(full_name: str, expected: str) -> str | None:
+    """Why the repository at the pinned id is not the signer repository, or None."""
+    if full_name.lower() != expected.lower():
+        return f"repository {full_name} is at the pinned id, not {expected}"
+    return None
+
+
+def protection_gaps(rule_types: list[str]) -> list[str]:
+    """The required rules a branch does not have in force (empty: it is protected)."""
+    return [rule for rule in REQUIRED_BRANCH_RULES if rule not in rule_types]
+
+
 _BUILD_SIGNER_DIGEST_OID = x509.ObjectIdentifier("1.3.6.1.4.1.57264.1.10")
 
 
@@ -210,11 +238,26 @@ class AttestationService(BaseInfraService):
         return True
 
     async def signer_head(self) -> str:
-        """The head commit of the signer's branch right now, read live."""
-        repo = self._settings.verify_repository
-        ref = _Ref.model_validate_json(
-            await self._get_bytes(f"/repos/{repo}/git/ref/heads/{self._settings.signer_branch}")
+        """The head commit of the signer's branch right now, read live, by repository id.
+
+        The repository at the pinned id must still be named verify_repository, and its branch
+        must be protected (no update, deletion or non-fast-forward), or evidence is refused."""
+        base = f"/repositories/{self._settings.signer_repository_id}"
+        repository = _Repository.model_validate_json(await self._get_bytes(base))
+        gap = repository_name_gap(repository.full_name, self._settings.verify_repository)
+        if repository.id != self._settings.signer_repository_id or gap is not None:
+            raise EvidenceRefusal(gap or "the signer repository id does not match")
+        branch = self._settings.signer_branch
+        rules = TypeAdapter(list[_Rule]).validate_json(
+            await self._get_bytes(f"{base}/rules/branches/{branch}")
         )
+        missing = protection_gaps([rule.type for rule in rules])
+        if missing:
+            name = self._settings.verify_repository.split("/")[1]
+            raise EvidenceRefusal(
+                f"{name} {branch} is not protected (missing {', '.join(missing)})"
+            )
+        ref = _Ref.model_validate_json(await self._get_bytes(f"{base}/git/ref/heads/{branch}"))
         if ref.object.type != "commit":
             raise AttestationError(
                 f"the signer branch does not point at a commit ({ref.object.type})"
@@ -223,9 +266,9 @@ class AttestationService(BaseInfraService):
 
     async def signer_tools_digest(self, signer_commit: str) -> str:
         """VERIFY_TOOLS_DIGEST as written in the signer workflow at the branch head read live."""
-        repo = self._settings.verify_repository
+        base = f"/repositories/{self._settings.signer_repository_id}"
         raw = await self._get_bytes(
-            f"/repos/{repo}/contents/{self._settings.workflow_path}",
+            f"{base}/contents/{self._settings.workflow_path}",
             {"ref": signer_commit},
             raw=True,
         )
