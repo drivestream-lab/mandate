@@ -35,3 +35,13 @@ WAVE_RULE = GateRule(
     label="wave-accepted", branch="develop", rung=RungType.L2, holders=frozenset({SIGNER_LOGIN})
 )
 """The wave gate as the sandbox configures it: its own label, and its own -revised and -stale."""
+
+
+def edit_review_body(token: str, ref: PullRequestRef, review_id: int, body: str) -> None:
+    """Someone other than the reviewer rewrites a review's body (GitHub allows it)."""
+    httpx.put(
+        f"https://api.github.com/repos/{OWNER}/{ref.repo}/pulls/{ref.number}/reviews/{review_id}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        json={"body": body},
+        timeout=30,
+    ).raise_for_status()

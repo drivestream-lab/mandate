@@ -8,8 +8,9 @@ import pytest
 
 from src.infra_services.github_app_service import GitHubAppService
 from src.infra_services.postgres_service import PostgresService
-from src.models.signoff_models import GateDecisionStateType
-from tests.journeys.sign_a_gate.conftest import GATE_RULE, SandboxDesk
+from src.models.ledger_models import RungType
+from src.models.signoff_models import GateDecisionStateType, GateRule
+from tests.journeys.sign_a_gate.conftest import GATE_LABEL, GATE_RULE, SIGNER_LOGIN, SandboxDesk
 from tests.journeys.sign_a_gate.support import STAMP, Services
 from tests.journeys.work_changes_after_approval.support import (
     WAVE_RULE,
@@ -151,3 +152,43 @@ async def test_the_old_approve_on_a_returned_head_is_named_by_the_void_and_does_
     pull.review(signer_token, "APPROVE", pull.attestation())
     again = await services.check.evaluate_and_post(github_app, pull.ref, GATE_RULE, STAMP)
     assert again.state is GateDecisionStateType.SUCCESS
+
+
+@pytest.mark.req("REQ-42")
+async def test_a_second_holders_earlier_approve_does_not_revive_a_returned_head_but_a_new_one_does(
+    postgres: PostgresService, github_app: GitHubAppService, sandbox_desk: SandboxDesk
+) -> None:
+    services = Services(postgres)
+    pull = sandbox_desk.open_pull_request("two-holders-returned-head")
+    pull.signer_signs()
+    pull.mandate_approves()
+    signed_head = pull.head_sha()
+    second = {
+        review.reviewer
+        for review in (await github_app.read_pull_request(pull.ref)).reviews
+        if review.reviewer != SIGNER_LOGIN
+    }
+    assert len(second) == 1
+    rule = GateRule(
+        label=GATE_LABEL,
+        branch="develop",
+        rung=RungType.L2,
+        holders=frozenset({SIGNER_LOGIN, *second}),
+    )
+    assert (
+        await services.check.evaluate_and_post(github_app, pull.ref, rule, STAMP)
+    ).state is GateDecisionStateType.SUCCESS
+    pull.author_pushes("detour-two-holders")
+    await services.check.evaluate_and_post(github_app, pull.ref, rule, STAMP)
+
+    # Both holders' Approves on the voided head are named, so neither revives it.
+    voids = await voids_recorded(services, "spec-lgtm revised")
+    assert len(voids) == 1 and len(voids[0].evidence) == 2
+    pull.force_push_to(signed_head)
+    back = await services.check.evaluate_and_post(github_app, pull.ref, rule, STAMP)
+    assert back.state is GateDecisionStateType.FAILURE
+
+    # The second holder approving again, after the void, restores it.
+    pull.mandate_approves()
+    again = await services.check.evaluate_and_post(github_app, pull.ref, rule, STAMP)
+    assert again.state is GateDecisionStateType.SUCCESS and again.signer in second

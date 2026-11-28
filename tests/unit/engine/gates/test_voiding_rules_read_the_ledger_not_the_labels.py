@@ -4,7 +4,7 @@ Void label names come with the gate (the wave gate has its own), the stale basel
 holder attested, a void needs a later signoff, and a no belongs to its decision and its holder.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import re
@@ -17,7 +17,11 @@ from src.engine.gates.voiding_rules import (
     attested_upstream_heads,
     changed_upstreams,
     revised_label,
-    is_mandate_actor,
+    approves_on_head,
+    attestation_evidence,
+    body_digest,
+    pinned_digest,
+    without_reviews,
     revised_role,
     signoff_is_voided,
     stale_role,
@@ -33,6 +37,10 @@ from src.models.signoff_models import (
     AttestedUpstream,
     MANDATE_ACTOR,
     GateRule,
+    PullRequestSnapshot,
+    PullReview,
+    ReviewerKindType,
+    ReviewStateType,
     UpstreamHead,
 )
 
@@ -134,10 +142,56 @@ def test_void_roles_follow_the_gates_own_label_not_its_display_labels() -> None:
 @pytest.mark.req("REQ-42")
 def test_no_github_login_can_be_taken_for_mandate() -> None:
     login = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$")
-    assert is_mandate_actor(MANDATE_ACTOR)
     assert login.fullmatch(MANDATE_ACTOR) is None
     for account in ("mandate", "Mandate", "mandate[bot]", "mandate-app"):
-        assert not is_mandate_actor(account)
+        assert account != MANDATE_ACTOR
+
+
+def _review(review_id: int, who: str, head: str, state: ReviewStateType) -> PullReview:
+    return PullReview(
+        review_id=review_id,
+        reviewer=who,
+        reviewer_kind=ReviewerKindType.USER,
+        state=state,
+        commit_id=head,
+        body="b",
+        submitted_at=_NOW + timedelta(seconds=review_id),
+    )
+
+
+def _snapshot(reviews: tuple[PullReview, ...]) -> PullRequestSnapshot:
+    return PullRequestSnapshot(
+        ref=PullRequestRef(repo="r", number=1),
+        base_ref="develop",
+        head_sha=_HEAD_A,
+        labels=("spec-lgtm",),
+        is_draft=False,
+        reviews=reviews,
+    )
+
+
+@pytest.mark.req("REQ-42")
+def test_a_void_names_every_approve_on_the_head_by_any_reviewer() -> None:
+    snapshot = _snapshot(
+        (
+            _review(1, "holder-a", _HEAD_A, ReviewStateType.DISMISSED),
+            _review(2, "holder-b", _HEAD_A, ReviewStateType.APPROVED),
+            _review(3, "holder-b", _HEAD_B, ReviewStateType.APPROVED),
+            _review(4, "holder-c", _HEAD_A, ReviewStateType.COMMENTED),
+        )
+    )
+    assert approves_on_head(snapshot, _HEAD_A) == (1, 2)
+    left = without_reviews(snapshot, frozenset({1, 2}))
+    assert [review.review_id for review in left.reviews] == [3, 4]
+
+
+@pytest.mark.req("REQ-40")
+def test_the_pinned_digest_is_the_hash_of_the_exact_body() -> None:
+    body = "attestation:\n  head: x\n"
+    evidence = attestation_evidence(7, body_digest(body))
+    assert pinned_digest(evidence) == body_digest(body)
+    assert pinned_digest(attestation_evidence(7, body_digest(body + " "))) != body_digest(body)
+    assert pinned_digest(()) is None
 
 
 @pytest.mark.req("REQ-121")

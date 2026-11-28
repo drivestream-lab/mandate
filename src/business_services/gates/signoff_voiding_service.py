@@ -24,10 +24,8 @@ from src.engine.gates.voiding_rules import (
     revised_cause,
     revised_label,
     revised_role,
-    signoff_is_voided,
     review_evidence,
-    voided_review_ids,
-    voided_reviews_of,
+    approves_on_head,
     stale_cause,
     stale_failure_reason,
     stale_label,
@@ -35,7 +33,6 @@ from src.engine.gates.voiding_rules import (
     earlier_approves,
     unresolved_no,
     upstream_evidence,
-    void_failure_reason,
 )
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
@@ -87,9 +84,7 @@ class SignoffVoidingService(BaseBusinessService):
             )
             if recorded != SIGNOFF_CHOICE:
                 continue
-            review_ids = voided_reviews_of(
-                earlier_approves(snapshot, rule), earlier.reviewer, earlier.head_sha
-            )
+            review_ids = approves_on_head(snapshot, earlier.head_sha)
             await self._record(
                 rule,
                 revised_role(rule),
@@ -126,29 +121,12 @@ class SignoffVoidingService(BaseBusinessService):
             snapshot.head_sha,
             stale_cause(changed, signoff.review_id),
             (f"an upstream change after {signoff.signer} reviewed against it",),
-            review_evidence((signoff.review_id,)) + upstream_evidence(changed),
+            review_evidence(approves_on_head(snapshot, snapshot.head_sha))
+            + upstream_evidence(changed),
             stamp,
         )
         await self._label(github, snapshot, stale_label(rule))
         return stale_failure_reason(stale_label(rule))
-
-    async def void_failure(
-        self, snapshot: PullRequestSnapshot, signoff: SignoffReading, rule: GateRule
-    ) -> str | None:
-        """The reason the Approve behind this signoff was voided, or None.
-
-        A head carrying a void passes only on an Approve that no void on this head names, so a
-        branch moved back to a commit that was signed before needs a new Approve.
-        """
-        voided: set[int] = set()
-        for role in (revised_role(rule), stale_role(rule)):
-            for record in await self._ledger.decision_records(
-                MANDATE_ACTOR, role, snapshot.head_sha
-            ):
-                voided |= voided_review_ids(record.evidence)
-        if not signoff_is_voided(signoff.review_id, frozenset(voided)):
-            return None
-        return void_failure_reason(revised_label(rule))
 
     async def clear_labels(
         self, github: LabelClient, snapshot: PullRequestSnapshot, rule: GateRule

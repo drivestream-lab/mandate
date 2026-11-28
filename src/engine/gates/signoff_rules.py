@@ -7,6 +7,8 @@ assumed: a missing or unreadable part is a reason, never a pass. No timeout or d
 here, so a gate held by a person has no signoff until that person's Approve is on the head.
 """
 
+import hashlib
+
 import yaml
 from pydantic import ValidationError
 
@@ -106,6 +108,7 @@ def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAsse
                     label=rule.label,
                     head_sha=snapshot.head_sha,
                     review_id=review.review_id,
+                    body_digest=hashlib.sha256(review.body.encode()).hexdigest(),
                     signed_at=review.submitted_at,
                     attestation=attestation,
                 ),

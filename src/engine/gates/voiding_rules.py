@@ -15,7 +15,6 @@ from src.models.gate_models import PullRequestRef
 from src.models.ledger_models import EvidenceReference
 from src.models.signoff_models import (
     Attestation,
-    MANDATE_ACTOR,
     GateRule,
     PullRequestSnapshot,
     ReviewStateType,
@@ -27,6 +26,7 @@ WAVE_GATE_LABEL = "wave-accepted"
 WAVE_STEM = "wave"
 UPSTREAM_EVIDENCE_KIND = "upstream-head"
 VOIDED_REVIEW_EVIDENCE_KIND = "voided-review"
+ATTESTATION_EVIDENCE_KIND = "attestation-body"
 
 
 def _stem(label: str) -> str:
@@ -58,11 +58,6 @@ def stale_role(rule: GateRule) -> str:
     return f"{rule.label} stale"
 
 
-def is_mandate_actor(actor: str) -> bool:
-    """True only for the name Mandate records its own entries under."""
-    return actor == MANDATE_ACTOR
-
-
 def pull_key(ref: PullRequestRef) -> str:
     return f"{ref.repo}#{ref.number}"
 
@@ -92,19 +87,66 @@ def earlier_approves(snapshot: PullRequestSnapshot, rule: GateRule) -> tuple[Ear
     return tuple(found)
 
 
-def voided_reviews_of(
-    earlier: Sequence[EarlierApprove], reviewer: str, head_sha: str
-) -> tuple[int, ...]:
-    """The ids of the Approves a new commit voids: the signer's Approves on the voided head."""
+def approves_on_head(snapshot: PullRequestSnapshot, head_sha: str) -> tuple[int, ...]:
+    """The ids of every Approve left on this head, by any reviewer, dismissed or not."""
     return tuple(
         sorted(
-            {
-                item.review_id
-                for item in earlier
-                if item.reviewer == reviewer and item.head_sha == head_sha
-            }
+            review.review_id
+            for review in snapshot.reviews
+            if review.commit_id == head_sha
+            and review.state in (ReviewStateType.APPROVED, ReviewStateType.DISMISSED)
         )
     )
+
+
+def without_reviews(
+    snapshot: PullRequestSnapshot, review_ids: frozenset[int]
+) -> PullRequestSnapshot:
+    """The pull request as read, minus the reviews a void names."""
+    return snapshot.model_copy(
+        update={
+            "reviews": tuple(
+                review for review in snapshot.reviews if review.review_id not in review_ids
+            )
+        }
+    )
+
+
+def body_digest(body: str) -> str:
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def attestation_role(rule: GateRule) -> str:
+    """The role the pinned digest of a signer's Approve body is recorded under."""
+    return f"{rule.label} attestation"
+
+
+def attestation_edited_role(rule: GateRule) -> str:
+    """The role Mandate records an edit of a signed Approve body under."""
+    return f"{rule.label} attestation edited"
+
+
+def attestation_key(head_sha: str, review_id: int) -> str:
+    return f"{head_sha}#{review_id}"
+
+
+def attestation_evidence(review_id: int, digest: str) -> tuple[EvidenceReference, ...]:
+    return (
+        EvidenceReference(
+            kind=ATTESTATION_EVIDENCE_KIND, reference=f"review {review_id}", digest=digest
+        ),
+    )
+
+
+def pinned_digest(evidence: Sequence[EvidenceReference]) -> str | None:
+    for item in evidence:
+        if item.kind == ATTESTATION_EVIDENCE_KIND:
+            return item.digest
+    return None
+
+
+EDITED_FAILURE_REASON = "the attestation was edited after signoff; the holder must approve again"
+NOT_PINNED_REASON = "no attestation is pinned for this signoff; only the event check pins one"
 
 
 def review_evidence(review_ids: Sequence[int]) -> tuple[EvidenceReference, ...]:
