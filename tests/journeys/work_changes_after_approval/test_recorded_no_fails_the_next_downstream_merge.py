@@ -7,17 +7,18 @@ again, or the holder withdraws the no. Nothing else is held while the no stands.
 
 from datetime import UTC, datetime
 
+import uuid
+
 import pytest
 
-from src.engine.gates.non_merge_rules import decision_from_review
+from src.engine.gates.non_merge_rules import decision_from_review, decision_role
 from src.infra_services.github_app_service import GitHubAppService
 from src.infra_services.postgres_service import PostgresService
+from src.models.gate_models import GateClassType
 from src.models.ledger_models import RungType
 from src.models.signoff_models import DecisionLink, GateDecisionStateType
-from tests.journeys.sign_a_gate.conftest import GATE_RULE, SandboxDesk
+from tests.journeys.sign_a_gate.conftest import GATE_RULE, SIGNER_LOGIN, SandboxDesk
 from tests.journeys.sign_a_gate.support import STAMP, Services, review_brief
-
-REVIEW_ROLE = "verification decision"
 
 
 @pytest.mark.req("REQ-121")
@@ -30,7 +31,15 @@ async def test_a_recorded_no_fails_the_next_downstream_merge_until_decided_again
     services = Services(postgres)
     spec = sandbox_desk.open_pull_request("spec-under-review")
     merge = sandbox_desk.open_pull_request("merge-downstream-of-spec")
-    links = (DecisionLink(artifact=spec.ref, downstream=merge.ref, decision_role=REVIEW_ROLE),)
+    gate_id = uuid.uuid4()
+    links = (
+        DecisionLink(
+            artifact=spec.ref,
+            downstream=merge.ref,
+            decision_role=decision_role(GateClassType.VERIFICATION, gate_id),
+            holder=SIGNER_LOGIN,
+        ),
+    )
     merge.signer_signs()
 
     async def record_verdict() -> None:
@@ -38,7 +47,7 @@ async def test_a_recorded_no_fails_the_next_downstream_merge_until_decided_again
         read = decision_from_review(await github_app.read_pull_request(spec.ref), GATE_RULE.holders)
         assert read is not None
         await services.non_merge.record_decision(
-            review_brief(head), read, RungType.L0, datetime.now(UTC), STAMP
+            review_brief(head), read, RungType.L0, datetime.now(UTC), STAMP, gate_id
         )
 
     async def merge_check() -> GateDecisionStateType:
@@ -56,7 +65,7 @@ async def test_a_recorded_no_fails_the_next_downstream_merge_until_decided_again
     failed = await services.check.evaluate_and_post(
         github_app, merge.ref, GATE_RULE, STAMP, decision_links=links
     )
-    assert failed.state is GateDecisionStateType.FAILURE and "recorded no" in failed.reason
+    assert failed.state is GateDecisionStateType.FAILURE and "no recorded from" in failed.reason
     posted = merge.gate_decision()
     assert posted is not None and posted.state == "failure"
 
@@ -78,3 +87,58 @@ async def test_a_recorded_no_fails_the_next_downstream_merge_until_decided_again
     await record_verdict()
     assert await merge_check() is GateDecisionStateType.SUCCESS
     assert (await services.ledger.verify()).is_intact
+
+
+@pytest.mark.req("REQ-121")
+async def test_another_holders_approve_does_not_lift_the_no_of_the_decisions_holder(
+    postgres: PostgresService,
+    github_app: GitHubAppService,
+    sandbox_desk: SandboxDesk,
+    mandate_token: str,
+) -> None:
+    services = Services(postgres)
+    spec = sandbox_desk.open_pull_request("spec-two-holders")
+    merge = sandbox_desk.open_pull_request("merge-two-holders")
+    gate_id = uuid.uuid4()
+    links = (
+        DecisionLink(
+            artifact=spec.ref,
+            downstream=merge.ref,
+            decision_role=decision_role(GateClassType.VERIFICATION, gate_id),
+            holder=SIGNER_LOGIN,
+        ),
+    )
+    merge.signer_signs()
+
+    async def record(holders: frozenset[str]) -> None:
+        read = decision_from_review(await github_app.read_pull_request(spec.ref), holders)
+        assert read is not None
+        await services.non_merge.record_decision(
+            review_brief(spec.head_sha()), read, RungType.L0, datetime.now(UTC), STAMP, gate_id
+        )
+
+    async def merge_state() -> GateDecisionStateType:
+        outcome = await services.check.evaluate_and_post(
+            github_app, merge.ref, GATE_RULE, STAMP, decision_links=links
+        )
+        return outcome.state
+
+    spec.signer_reviews("REQUEST_CHANGES")
+    await record(GATE_RULE.holders)
+    assert await merge_state() is GateDecisionStateType.FAILURE
+
+    # Another holder of the same class approves the same head and Mandate records it.
+    spec.review(mandate_token, "APPROVE", "technical review")
+    others = frozenset(
+        review.reviewer
+        for review in (await github_app.read_pull_request(spec.ref)).reviews
+        if review.reviewer != SIGNER_LOGIN
+    )
+    assert others
+    await record(others)
+    assert await merge_state() is GateDecisionStateType.FAILURE
+
+    # Only the holder's own later approve lifts it.
+    spec.signer_reviews("APPROVE")
+    await record(GATE_RULE.holders)
+    assert await merge_state() is GateDecisionStateType.SUCCESS

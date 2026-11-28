@@ -226,14 +226,6 @@ class LedgerAppendService(BaseBusinessService):
             )
         return None if existing is None else _record_of(existing)
 
-    async def latest_choice_for_role(self, role: str, target_version: str) -> str | None:
-        """The choice last recorded on this role and version by anyone, or None."""
-        async with self._postgres.get_session() as session:
-            existing = await self._repository.find_latest_decision_for_role(
-                session, role, target_version
-            )
-        return None if existing is None else _choice_of(existing)
-
     async def verify(self, anchor: ChainAnchor | None = None) -> ChainVerification:
         """Read the whole chain and check it, against the anchor when one is given."""
         async with self._postgres.get_session() as session:

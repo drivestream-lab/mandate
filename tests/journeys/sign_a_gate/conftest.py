@@ -10,6 +10,7 @@ token fails the run at once. Pull requests and branches are removed at the end.
 import base64
 import os
 import time
+from collections.abc import Sequence
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -58,6 +59,11 @@ L0_GATE_RULE = GateRule(
     label=GATE_LABEL, branch="develop", rung=RungType.L0, holders=frozenset({SIGNER_LOGIN})
 )
 """The same gate at L0, where only a person may sign: an App's Approve is refused."""
+
+PUSH_VISIBLE_SECONDS = 240
+"""How long to wait for GitHub to show a pushed head on the pull request."""
+STATUS_VISIBLE_SECONDS = 20
+"""How long to wait for a posted status to be readable back."""
 
 _SECRETS = Path.home() / ".mandate" / "secrets" / "test"
 
@@ -149,7 +155,7 @@ class SandboxPullRequest:
                 },
             ).raise_for_status()
         pushed = _Written.model_validate_json(reply.content).commit.sha
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + PUSH_VISIBLE_SECONDS
         while time.monotonic() < deadline:
             try:
                 if self.head_sha() == pushed:
@@ -159,8 +165,8 @@ class SandboxPullRequest:
             time.sleep(1)
         raise TimeoutError("the pull request did not move to the pushed commit")
 
-    def signer_labels(self) -> None:
-        self.add_label(self._signer, GATE_LABEL)
+    def signer_labels(self, gate: str = GATE_LABEL) -> None:
+        self.add_label(self._signer, gate)
 
     def author_adds_label(self, label: str) -> None:
         """The author picks another gate label for the same pull request."""
@@ -179,13 +185,36 @@ class SandboxPullRequest:
                 json={"commit_id": self.head_sha(), "event": event, "body": body},
             ).raise_for_status()
 
-    def attestation(self) -> str:
-        return (
+    def attestation(
+        self, gate: str = GATE_LABEL, upstream: Sequence[tuple[PullRequestRef, str]] = ()
+    ) -> str:
+        """The attestation body for this head; `upstream` lists each upstream pull request with
+        the head the holder reviewed against."""
+        text = (
             "attestation:\n  initiative: INIT-JOURNEY\n"
-            f"  head: {self.head_sha()}\n  gate: {GATE_LABEL}\n  repo: {REPO}\n"
+            f"  head: {self.head_sha()}\n  gate: {gate}\n  repo: {REPO}\n"
             f"  pull_request: {self.ref.number}\n  digests: ['{'c' * 64}']\n"
             "  artifact_paths: [journey.txt]\n"
         )
+        if upstream:
+            text += "  upstream:\n" + "".join(
+                f"    - repo: {ref.repo}\n      pull_request: {ref.number}\n      head: {head}\n"
+                for ref, head in upstream
+            )
+        return text
+
+    def force_push_to(self, sha: str) -> None:
+        """The author moves the branch back to a commit it had before."""
+        with _client(self._author) as client:
+            client.patch(
+                f"/git/refs/heads/{self._branch}", json={"sha": sha, "force": True}
+            ).raise_for_status()
+        deadline = time.monotonic() + PUSH_VISIBLE_SECONDS
+        while time.monotonic() < deadline:
+            if self.head_sha() == sha:
+                return
+            time.sleep(1)
+        raise TimeoutError("the pull request did not move back to the commit")
 
     def retarget(self, base: str) -> None:
         """The author changes the pull request's base branch."""
@@ -257,10 +286,12 @@ class SandboxPullRequest:
         if reply.json().get("errors"):
             raise RuntimeError("the signer could not mark the pull request ready")
 
-    def signer_signs(self) -> None:
+    def signer_signs(
+        self, gate: str = GATE_LABEL, upstream: Sequence[tuple[PullRequestRef, str]] = ()
+    ) -> None:
         """The signoff as the holder gives it: label, Approve with attestation, ready."""
-        self.signer_labels()
-        self.review(self._signer, "APPROVE", self.attestation())
+        self.signer_labels(gate)
+        self.review(self._signer, "APPROVE", self.attestation(gate, upstream))
         self.signer_marks_ready()
 
     def signer_reviews(self, event: str) -> None:
@@ -272,11 +303,15 @@ class SandboxPullRequest:
 
     def gate_decision(self) -> _Status | None:
         """The mandate/gate-decision status on the current head, read back from GitHub."""
-        with _client(self._mandate) as client:
-            reply = client.get(f"/commits/{self.head_sha()}/status").raise_for_status()
-        found = [s for s in _Combined.model_validate_json(reply.content).statuses
-                 if s.context == "mandate/gate-decision"]  # fmt: skip
-        return found[0] if found else None
+        deadline = time.monotonic() + STATUS_VISIBLE_SECONDS
+        while True:
+            with _client(self._mandate) as client:
+                reply = client.get(f"/commits/{self.head_sha()}/status").raise_for_status()
+            found = [s for s in _Combined.model_validate_json(reply.content).statuses
+                     if s.context == "mandate/gate-decision"]  # fmt: skip
+            if found or time.monotonic() >= deadline:
+                return found[0] if found else None
+            time.sleep(1)
 
     def close(self) -> None:
         with _client(self._author) as client:

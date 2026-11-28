@@ -86,11 +86,34 @@ class GateRule(BaseModel):
     branch: str = Field(min_length=1, description="The branch whose merge this gate decides")
     rung: RungType
     holders: frozenset[str] = Field(min_length=1, description="Logins that may sign this gate")
+    revised_label: str | None = Field(
+        default=None,
+        pattern=_NON_BLANK,
+        description="The label shown when a push voids the signoff; None takes the usual name",
+    )
+    stale_label: str | None = Field(
+        default=None,
+        pattern=_NON_BLANK,
+        description="The label shown when an upstream change voids the signoff; None takes the usual name",
+    )
+
+
+class AttestedUpstream(BaseModel):
+    """An upstream pull request and the head the holder reviewed the signed artifact against."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    repo: str = Field(min_length=1, pattern=_NON_BLANK)
+    pull_request: int = Field(gt=0)
+    head: str = Field(pattern=_SHA)
 
 
 class Attestation(BaseModel):
     """What an Approve's body must carry: initiative, head, digests, artifact paths, and the
-    gate, repository and pull request it signs. Every field is required; none may be added."""
+    gate, repository and pull request it signs. Every field is required, except `upstream`:
+    the pull requests upstream of this one, each with the head the holder reviewed against
+    (empty for a gate with none). A pull request linked to an upstream one that is missing from
+    the list, or listed at another head than it has now, is stale. No other field may be added."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -101,6 +124,7 @@ class Attestation(BaseModel):
     pull_request: int = Field(gt=0)
     digests: tuple[str, ...] = Field(min_length=1, description="Hex SHA-256 of each artifact")
     artifact_paths: tuple[str, ...] = Field(min_length=1)
+    upstream: tuple[AttestedUpstream, ...] = ()
 
     @field_validator("digests")
     @classmethod
@@ -192,7 +216,14 @@ class DecisionLink(BaseModel):
     artifact: PullRequestRef
     downstream: PullRequestRef
     decision_role: str = Field(
-        min_length=1, pattern=_NON_BLANK, description="The role the decision is recorded under"
+        min_length=1,
+        pattern=_NON_BLANK,
+        description="The role this one decision is recorded under (it names the decision's gate)",
+    )
+    holder: str = Field(
+        min_length=1,
+        pattern=_NON_BLANK,
+        description="Who holds this decision: only their word counts",
     )
 
 

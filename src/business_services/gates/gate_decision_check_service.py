@@ -243,7 +243,7 @@ class GateDecisionCheckService(BaseBusinessService):
             if link.downstream == ref
         ]
         if may_record:
-            await self._signoffs.record_signoff(signoff, rule, stamp, upstream_now)
+            await self._signoffs.record_signoff(signoff, rule, stamp)
         elif not await self._signoffs.is_recorded(signoff, rule):
             return not_recorded_for_recheck(head, rule)
         recorded = await self._signoffs.is_recorded(signoff, rule)
@@ -254,6 +254,9 @@ class GateDecisionCheckService(BaseBusinessService):
         )
         if stale is not None:
             return failure(head, stale)
+        voided = await self._voiding.void_failure(snapshot, signoff, rule)
+        if voided is not None:
+            return failure(head, voided)
         unresolved = await self._voiding.unresolved_no_failure(github, ref, scope.decision_links)
         if unresolved is not None:
             return failure(head, unresolved)

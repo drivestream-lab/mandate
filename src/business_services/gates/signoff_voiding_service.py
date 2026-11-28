@@ -17,20 +17,23 @@ from src.business_services.base_business_service import BaseBusinessService
 from src.business_services.gates.signoff_service import SIGNOFF_CHOICE, PullRequestReader
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
 from src.engine.gates.voiding_rules import (
+    attested_upstream_heads,
     changed_upstreams,
     heads_newest_first,
-    heads_signed_against,
+    latest_time,
     recorded_no_failure_reason,
-    revised_reason,
+    revised_cause,
     revised_label,
     revised_role,
-    stale_reason,
+    signoff_follows_void,
+    stale_cause,
     stale_failure_reason,
     stale_label,
     stale_role,
     earlier_approves,
     unresolved_no,
     upstream_evidence,
+    void_failure_reason,
 )
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
@@ -46,7 +49,6 @@ from src.models.signoff_models import (
 
 _WORKFLOW_VERSION = "gate-voiding/1"
 _RULES_VERSION = "mandate-rules"
-VOIDED_OPTION = "voided"
 
 
 class LabelClient(Protocol):
@@ -74,7 +76,8 @@ class SignoffVoidingService(BaseBusinessService):
     ) -> bool:
         """Record the void of a signoff the ledger holds for an earlier head, and label the pull request.
 
-        True when there is one. Writing is idempotent per voided head and new head.
+        True when there is one. Each signoff voided by each new head is recorded once, so a head
+        that returns after being signed and voided again is voided again.
         """
         for earlier in earlier_approves(snapshot, rule):
             recorded = await self._ledger.latest_choice(
@@ -86,12 +89,9 @@ class SignoffVoidingService(BaseBusinessService):
                 rule,
                 revised_role(rule),
                 earlier.head_sha,
-                (
-                    f"{earlier.reviewer}'s recorded signoff on {earlier.head_sha} "
-                    f"no longer covers {snapshot.head_sha}: {revised_reason(snapshot.head_sha)}",
-                ),
+                revised_cause(earlier, snapshot.head_sha),
+                (f"{earlier.reviewer}'s recorded signoff on {earlier.head_sha} no longer holds",),
                 (),
-                "the head moved again",
                 stamp,
             )
             await self._label(github, snapshot, revised_label(rule))
@@ -107,32 +107,42 @@ class SignoffVoidingService(BaseBusinessService):
         upstream_now: Sequence[UpstreamHead],
         stamp: VersionStamp,
     ) -> str | None:
-        """The reason this head's signoff is stale, or None. Records the void on first sight.
+        """The reason this signoff is stale, or None. Records the void when it is first seen.
 
-        Once a stale void is in the ledger for this head, that head stays stale: the holder signs
-        the downstream pull request again on a new head.
+        The baseline is what the holder attested: a linked upstream pull request that the
+        attestation does not name, or names at another head, is stale.
         """
-        head = snapshot.head_sha
-        reason = stale_failure_reason(stale_label(rule))
-        if await self._ledger.latest_choice(MANDATE_ACTOR, stale_role(rule), head) is not None:
-            return reason
-        signed = await self._ledger.latest_decision_record(signoff.signer, rule.label, head)
-        if signed is None:
-            return f"{rule.label}: no recorded signoff on this head to compare the upstream with"
-        changed = changed_upstreams(heads_signed_against(signed.evidence), upstream_now)
+        changed = changed_upstreams(attested_upstream_heads(signoff.attestation), upstream_now)
         if not changed:
             return None
         await self._record(
             rule,
             stale_role(rule),
-            head,
-            (f"an upstream change after {signoff.signer} signed {head}: {stale_reason(changed)}",),
+            snapshot.head_sha,
+            stale_cause(changed, signoff.signed_at),
+            (f"an upstream change after {signoff.signer} reviewed against it",),
             upstream_evidence(changed),
-            "another upstream change",
             stamp,
         )
         await self._label(github, snapshot, stale_label(rule))
-        return reason
+        return stale_failure_reason(stale_label(rule))
+
+    async def void_failure(
+        self, snapshot: PullRequestSnapshot, signoff: SignoffReading, rule: GateRule
+    ) -> str | None:
+        """The reason a void on this head still stands, or None.
+
+        A head carrying a revised or stale void needs a signoff given after the void, even when
+        the head is a commit that was signed before.
+        """
+        head = snapshot.head_sha
+        times: list[datetime | None] = []
+        for role in (revised_role(rule), stale_role(rule)):
+            record = await self._ledger.latest_decision_record(MANDATE_ACTOR, role, head)
+            times.append(None if record is None else record.decided_at)
+        if signoff_follows_void(signoff.signed_at, latest_time(times)):
+            return None
+        return void_failure_reason(revised_label(rule))
 
     async def clear_labels(
         self, github: LabelClient, snapshot: PullRequestSnapshot, rule: GateRule
@@ -148,17 +158,20 @@ class SignoffVoidingService(BaseBusinessService):
         downstream: PullRequestRef,
         links: Sequence[DecisionLink],
     ) -> str | None:
-        """The reason a linked artifact's recorded no blocks this merge, or None."""
+        """The reason a linked decision's recorded no blocks this merge, or None.
+
+        Only the holder of that decision, in that decision's own role, counts.
+        """
         for link in links:
             if link.downstream != downstream:
                 continue
             artifact = await github.read_pull_request(link.artifact)
             choices = [
-                await self._ledger.latest_choice_for_role(link.decision_role, head)
+                await self._ledger.latest_choice(link.holder, link.decision_role, head)
                 for head in heads_newest_first(artifact)
             ]
             if unresolved_no(choices):
-                return recorded_no_failure_reason(link.artifact)
+                return recorded_no_failure_reason(link.artifact, link.holder)
         return None
 
     async def _record(
@@ -166,19 +179,20 @@ class SignoffVoidingService(BaseBusinessService):
         rule: GateRule,
         role: str,
         target_head: str,
+        cause: str,
         reasons: tuple[str, ...],
         evidence: tuple[EvidenceReference, ...],
-        change_reason: str,
         stamp: VersionStamp,
     ) -> None:
+        """Write a void once per cause; a new cause on the same gate and head is a correction."""
         record = DecisionRecord(
             actor=MANDATE_ACTOR,
             role=role,
             rung=rule.rung,
             options_offered=(
-                DecisionOption(option_id=VOIDED_OPTION, description="The signoff no longer counts"),
+                DecisionOption(option_id=cause, description="The signoff no longer counts"),
             ),
-            choice=VOIDED_OPTION,
+            choice=cause,
             reasons=reasons,
             evidence=evidence,
             target_version=target_head,
@@ -186,7 +200,7 @@ class SignoffVoidingService(BaseBusinessService):
             model_version=_RULES_VERSION,
             decided_at=datetime.now(UTC),
         )
-        await self._ledger.record_decision_once(record, stamp, change_reason)
+        await self._ledger.record_decision_once(record, stamp, "another cause voided it")
 
     async def _label(self, github: LabelClient, snapshot: PullRequestSnapshot, label: str) -> None:
         if label not in snapshot.labels:

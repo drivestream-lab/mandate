@@ -3,9 +3,9 @@
 import httpx
 
 from src.models.gate_models import PullRequestRef
-from src.models.ledger_models import DecisionRecord, LedgerEntryType
-from src.models.signoff_models import MANDATE_ACTOR
-from tests.journeys.sign_a_gate.conftest import OWNER
+from src.models.ledger_models import DecisionRecord, LedgerEntryType, RungType
+from src.models.signoff_models import MANDATE_ACTOR, GateRule
+from tests.journeys.sign_a_gate.conftest import OWNER, SIGNER_LOGIN
 from tests.journeys.sign_a_gate.support import Services
 
 
@@ -29,3 +29,9 @@ def remove_label(token: str, ref: PullRequestRef, label: str) -> None:
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
         timeout=30,
     ).raise_for_status()
+
+
+WAVE_RULE = GateRule(
+    label="wave-accepted", branch="develop", rung=RungType.L2, holders=frozenset({SIGNER_LOGIN})
+)
+"""The wave gate as the sandbox configures it: its own label, and its own -revised and -stale."""

@@ -7,9 +7,11 @@ this blocks work: absence of a decision simply means nothing is recorded.
 """
 
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from src.models.gate_models import GateClassType
 from src.models.paperclip_models import InteractionStatusType, PaperclipQuestion
 from src.models.signoff_models import PullRequestSnapshot, ReviewStateType
 
@@ -63,3 +65,13 @@ def decision_from_answer(
         if answer.question_id == question_id and len(answer.option_ids) == 1:
             return ReadDecision(holder=resolver, option_id=answer.option_ids[0], decided_at=None)
     return None
+
+
+def decision_role(gate_class: GateClassType, gate_id: UUID | None) -> str:
+    """The role a decision is recorded under: its class, and its own gate when it has one.
+
+    Two decisions of the same class on different gates are different roles, so one holder's
+    word on one never stands in for another.
+    """
+    base = f"{gate_class.value} decision"
+    return base if gate_id is None else f"{base} {gate_id}"
