@@ -1,9 +1,12 @@
 """Mandate's client for GitHub, acting as Mandate's App and nothing else.
 
 It reads pull requests (head, labels, ready state, reviews), posts the required check
-mandate/gate-decision on a head, and posts a brief or a review request on a pull request. It
-never applies a label, approves, marks ready or merges: those belong to the signer. A response
-that does not fit the expected shape raises; nothing is guessed.
+mandate/gate-decision on a head, and posts a brief or a review request on a pull request. It also
+reads what a sweep judges (commits and their merged pull requests, the check's statuses, rulesets,
+branch protection) and opens a revert pull request. Applying a label, approving, marking ready and
+merging are here for the rungs where Mandate's App is the signer (L2 and L3); the caller decides
+when, and the merge always pins the sha. A response that does not fit the expected shape raises;
+nothing is guessed.
 """
 
 import time
@@ -14,13 +17,15 @@ from urllib.parse import quote
 import httpx
 from injector import NoInject, inject
 from jose import jwt
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from src.configs.github_app_settings import GitHubAppSettings
 from src.engine.gates.gate_decision_rules import PAGE_SIZE, next_page
+from src.engine.gates.unguarded_merge_rules import unreadable_ruleset
 from src.infra_services.base_infra_service import BaseInfraService
 from src.logging import get_logger
 from src.models.gate_models import PullRequestRef
+from src.models.sweep_models import BranchCommit, CompareResult, HeadStatus, PullMerge
 from src.models.signoff_models import (
     GATE_DECISION_CONTEXT,
     GateDecisionStateType,
@@ -35,6 +40,7 @@ logger = get_logger()
 
 _TOKEN_REUSE_SECONDS = 50 * 60
 _STATUS_DESCRIPTION_LIMIT = 140
+_MAX_PULL_PAGES = 20
 _READ_ATTEMPTS = 3
 """Reads and the check status (same state, same effect) are repeated after a dropped
 connection or a 5xx; comments and reviews never are."""
@@ -68,6 +74,7 @@ class _Base(_Record):
 
 
 class _Pull(_Record):
+    node_id: str
     head: _Head
     base: _Base
     draft: bool
@@ -93,6 +100,78 @@ class _ListedPull(_Record):
     base: _Base
     head: _Head
     labels: list[_Label]
+
+
+class _App(_Record):
+    slug: str
+
+
+class _Merged(_Record):
+    sha: str
+    merged: bool
+
+
+class _Person(_Record):
+    login: str
+
+
+class _CommitItem(_Record):
+    sha: str
+    parents: list[_Head]
+
+
+class _FullPull(_Record):
+    number: int
+    node_id: str
+    base: _Base
+    head: _Head
+    merge_commit_sha: str | None
+    merged_at: datetime | None
+    merged_by: _Person | None
+
+
+class _StatusItem(_Record):
+    state: str
+    context: str
+    creator: _Person | None
+    created_at: datetime
+
+
+class _ClosedPull(_Record):
+    number: int
+    merged_at: datetime | None
+    merge_commit_sha: str | None
+
+
+class _Compare(_Record):
+    status: str
+    ahead_by: int
+    merge_base_commit: _Head
+
+
+class _Branch(_Record):
+    commit: _Head
+
+
+class _Summary(_Record):
+    id: int
+
+
+class _Revert(_Record):
+    number: int
+
+
+class _RevertData(_Record):
+    revertPullRequest: _Revert
+
+
+class _RevertMutation(_Record):
+    revertPullRequest: _RevertData
+
+
+class _GraphqlAnswer(_Record):
+    data: dict[str, JsonValue] | None = None
+    errors: list[JsonValue] | None = None
 
 
 class _EditCount(_Record):
@@ -140,6 +219,11 @@ _EDIT_QUERY = (
 )
 
 _REVIEWS = TypeAdapter(list[_Review])
+_CLOSED_PULLS = TypeAdapter(list[_ClosedPull])
+_STATUSES = TypeAdapter(list[_StatusItem])
+_SUMMARIES = TypeAdapter(list[_Summary])
+_DOCUMENT = TypeAdapter(dict[str, JsonValue])
+_PROTECTION: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _OPEN_PULLS = TypeAdapter(list[_ListedPull])
 
 
@@ -301,12 +385,184 @@ class GitHubAppService(BaseInfraService):
             f"{repo}/pulls/{pull_request.number}/reviews", {"event": "COMMENT", "body": body}
         )
 
-    async def _token_for_calls(self) -> str:
-        if self._token is not None and time.monotonic() - self._token_at < _TOKEN_REUSE_SECONDS:
-            return self._token
-        client = self._ready()
+    async def app_login(self) -> str:
+        """The login Mandate's own reviews, statuses and merges carry (the App's slug and [bot])."""
+        response = await self._ready().get("/app", headers=_headers(self._app_jwt()))
+        self._raise_for_status(response, "/app")
+        return f"{self._parse(_App, response).slug}[bot]"
+
+    async def approve_pull(self, ref: PullRequestRef, head_sha: str, body: str) -> None:
+        """Approve a pull request on exactly this head, with the attestation as the body."""
+        path = f"/repos/{self._settings.owner}/{ref.repo}/pulls/{ref.number}/reviews"
+        await self._post(path, {"event": "APPROVE", "commit_id": head_sha, "body": body})
+
+    async def mark_pull_ready(self, ref: PullRequestRef) -> None:
+        """Take a draft pull request out of draft."""
+        path = f"/repos/{self._settings.owner}/{ref.repo}/pulls/{ref.number}"
+        node_id = self._parse(_Pull, await self._get(path)).node_id
+        query = (
+            "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id})"
+            "{pullRequest{isDraft}}}"
+        )
+        answer = await self._graphql(query, node_id)
+        if answer.errors:
+            raise GitHubError(f"GitHub refused to mark {ref.repo}#{ref.number} ready")
+
+    async def merge_pull(self, ref: PullRequestRef, sha: str) -> str:
+        """Merge with the sha pinned: GitHub refuses unless the head is exactly this commit and the
+        required check passes on it. Returns the merge commit. Never repeated."""
+        path = f"/repos/{self._settings.owner}/{ref.repo}/pulls/{ref.number}/merge"
+        response = await self._send("PUT", path, None, {"sha": sha, "merge_method": "merge"}, False)
+        self._raise_for_status(response, path)
+        merged = self._parse(_Merged, response)
+        if not merged.merged:
+            raise GitHubError(f"GitHub did not merge {ref.repo}#{ref.number}")
+        return merged.sha
+
+    async def read_branch_tip(self, repo: str, branch: str) -> str:
+        """The commit a branch points at now."""
+        path = f"/repos/{self._settings.owner}/{repo}/branches/{quote(branch, safe='')}"
+        return self._parse(_Branch, await self._get(path)).commit.sha
+
+    async def read_commit(self, repo: str, sha: str) -> BranchCommit:
+        """A commit's parents, in order. Only its parents are read."""
+        path = f"/repos/{self._settings.owner}/{repo}/commits/{sha}"
+        item = self._parse(_CommitItem, await self._get(path))
+        return BranchCommit(sha=item.sha, parents=tuple(parent.sha for parent in item.parents))
+
+    async def compare(self, repo: str, base: str, head: str) -> CompareResult:
+        """How head stands against base (identical, ahead, behind or diverged), by how many
+        commits, and where they last agreed."""
+        path = f"/repos/{self._settings.owner}/{repo}/compare/{base}...{head}"
+        item = self._parse(_Compare, await self._get(path, {"per_page": 1}))
+        return CompareResult(
+            status=item.status, ahead_by=item.ahead_by, merge_base=item.merge_base_commit.sha
+        )
+
+    async def merged_pulls_with_commits(
+        self, repo: str, branch: str, shas: frozenset[str]
+    ) -> tuple[PullMerge, ...]:
+        """The pull requests into this branch that were merged as exactly these commits.
+
+        Closed pull requests are read newest first until every commit is matched or the pages
+        run out; a commit left unmatched is not a merged pull request's merge commit.
+        """
+        base = f"/repos/{self._settings.owner}/{repo}"
+        wanted = set(shas)
+        merged: list[PullMerge] = []
+        page: int | None = 1
+        while page is not None and wanted and page <= _MAX_PULL_PAGES:
+            params: dict[str, int | str] = {
+                "state": "closed", "base": branch, "sort": "updated", "direction": "desc",
+                "per_page": PAGE_SIZE, "page": page,
+            }  # fmt: skip
+            try:
+                batch = _CLOSED_PULLS.validate_json(
+                    (await self._get(f"{base}/pulls", params)).content
+                )
+            except ValidationError as error:
+                raise GitHubError(f"unexpected pulls answer for {repo}") from error
+            for item in batch:
+                if item.merged_at is None or item.merge_commit_sha not in wanted:
+                    continue
+                pull = self._parse(_FullPull, await self._get(f"{base}/pulls/{item.number}"))
+                if pull.merged_at is None or pull.merge_commit_sha is None:
+                    continue
+                wanted.discard(pull.merge_commit_sha)
+                merged.append(
+                    PullMerge(
+                        number=pull.number,
+                        node_id=pull.node_id,
+                        base_ref=pull.base.ref,
+                        head_sha=pull.head.sha,
+                        merge_commit_sha=pull.merge_commit_sha,
+                        merged_at=pull.merged_at,
+                        merged_by=None if pull.merged_by is None else pull.merged_by.login,
+                    )
+                )
+            page = next_page(page, len(batch))
+        return tuple(merged)
+
+    async def list_head_statuses(self, repo: str, sha: str) -> tuple[HeadStatus, ...]:
+        """Every mandate/gate-decision status posted on a commit."""
+        path = f"/repos/{self._settings.owner}/{repo}/commits/{sha}/statuses"
+        found: list[HeadStatus] = []
+        page: int | None = 1
+        while page is not None:
+            params: dict[str, int | str] = {"per_page": PAGE_SIZE, "page": page}
+            try:
+                batch = _STATUSES.validate_json((await self._get(path, params)).content)
+            except ValidationError as error:
+                raise GitHubError(f"unexpected answer for {path}") from error
+            found += [
+                HeadStatus(
+                    state=item.state,
+                    creator=None if item.creator is None else item.creator.login,
+                    created_at=item.created_at,
+                )
+                for item in batch
+                if item.context == GATE_DECISION_CONTEXT
+            ]
+            page = next_page(page, len(batch))
+        return tuple(found)
+
+    async def list_rulesets(self, repo: str) -> dict[int, dict[str, JsonValue]]:
+        """Every ruleset that applies to the repository (its own and its organisation's), in full,
+        all pages. An answer lacking a field the digest needs raises: it is unreadable."""
+        base = f"/repos/{self._settings.owner}/{repo}/rulesets"
+        found: dict[int, dict[str, JsonValue]] = {}
+        page: int | None = 1
+        try:
+            while page is not None:
+                params: dict[str, int | str] = {"per_page": PAGE_SIZE, "page": page}
+                batch = _SUMMARIES.validate_json((await self._get(base, params)).content)
+                for item in batch:
+                    document = _DOCUMENT.validate_json(
+                        (await self._get(f"{base}/{item.id}")).content
+                    )
+                    lacking = unreadable_ruleset(document)
+                    if lacking is not None:
+                        raise GitHubError(f"ruleset {item.id} of {repo} has no {lacking}")
+                    found[item.id] = document
+                page = next_page(page, len(batch))
+        except ValidationError as error:
+            raise GitHubError(f"unexpected rulesets answer for {repo}") from error
+        return found
+
+    async def read_branch_protection(self, repo: str, branch: str) -> JsonValue:
+        """A branch's protection as GitHub reports it; None when it has none."""
+        path = f"/repos/{self._settings.owner}/{repo}/branches/{quote(branch, safe='')}/protection"
+        response = await self._send("GET", path, None, None, True)
+        if response.status_code == 404:
+            return None
+        self._raise_for_status(response, path)
+        try:
+            return _PROTECTION.validate_json(response.content)
+        except ValidationError as error:
+            raise GitHubError(f"unexpected answer for {path}") from error
+
+    async def open_revert_pull(self, node_id: str) -> int:
+        """Open a revert pull request for a merged pull request; returns its number."""
+        query = "mutation($id:ID!){revertPullRequest(input:{pullRequestId:$id}){revertPullRequest{number}}}"
+        answer = await self._graphql(query, node_id)
+        if answer.errors or answer.data is None:
+            raise GitHubError("GitHub did not open the revert pull request")
+        try:
+            reverted = _RevertMutation.model_validate(answer.data)
+        except ValidationError as error:
+            raise GitHubError("unexpected answer to the revert request") from error
+        return reverted.revertPullRequest.revertPullRequest.number
+
+    async def _graphql(self, query: str, node_id: str) -> _GraphqlAnswer:
+        response = await self._send(
+            "POST", "/graphql", None, {"query": query, "variables": {"id": node_id}}, False
+        )
+        self._raise_for_status(response, "/graphql")
+        return self._parse(_GraphqlAnswer, response)
+
+    def _app_jwt(self) -> str:
         now = int(time.time())
-        app_jwt = jwt.encode(
+        return jwt.encode(
             {
                 "iat": now - 60,
                 "exp": now + 540,
@@ -315,6 +571,12 @@ class GitHubAppService(BaseInfraService):
             self._settings.private_key_file.read_text(encoding="utf-8"),
             algorithm="RS256",
         )
+
+    async def _token_for_calls(self) -> str:
+        if self._token is not None and time.monotonic() - self._token_at < _TOKEN_REUSE_SECONDS:
+            return self._token
+        client = self._ready()
+        app_jwt = self._app_jwt()
         installation = self._settings.installation_id_file.read_text(encoding="utf-8").strip()
         response = await client.post(
             f"/app/installations/{installation}/access_tokens", headers=_headers(app_jwt)

@@ -159,3 +159,29 @@ class VerifiedEvidence(BaseModel):
     signer_digest: str
     """The mandate-verify commit (main's head, read live) the evidence was trusted under;
     the ledger entry for the decision carries it."""
+
+
+class WaveEvidenceSpec(BaseModel):
+    """What the caller fixes about a wave's evidence, for any commit: the repository, its caller
+    workflow, the protected test set and the digest recorded at spec sign-off."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    caller_workflow: str
+    test_set: tuple[str, ...]
+    expected_test_set_digest: str
+    quarantine: tuple[str, ...] = ()
+    plugins: tuple[str, ...] = ()
+
+    def target_for(self, commit: str) -> EvidenceTarget:
+        """The evidence target for this exact head."""
+        return EvidenceTarget(
+            repository=self.repository,
+            commit=commit,
+            caller_workflow=self.caller_workflow,
+            test_set=self.test_set,
+            expected_test_set_digest=self.expected_test_set_digest,
+            quarantine=self.quarantine,
+            plugins=self.plugins,
+        )

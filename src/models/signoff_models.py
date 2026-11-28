@@ -80,6 +80,10 @@ class OpenPull(BaseModel):
     labels: tuple[str, ...] = ()
 
 
+WAVE_GATE_LABEL = "wave-accepted"
+"""The label of the wave gate: a gate with it is a wave gate whatever its rule says."""
+
+
 class GateRule(BaseModel):
     """A gate as the check knows it: its label, its rung and who holds it at that rung."""
 
@@ -89,6 +93,16 @@ class GateRule(BaseModel):
     branch: str = Field(min_length=1, description="The branch whose merge this gate decides")
     rung: RungType
     holders: frozenset[str] = Field(min_length=1, description="Logins that may sign this gate")
+    wave: bool = Field(
+        default=False,
+        description="True for a wave gate: the check then also needs run-signed evidence for the head",
+    )
+    deciding_role: str | None = Field(
+        default=None,
+        pattern=_NON_BLANK,
+        description="Who the ledger names for the deciding role's decision at L2 and L3, which "
+        "Mandate's App carries out",
+    )
     revised_label: str | None = Field(
         default=None,
         pattern=_NON_BLANK,
@@ -99,6 +113,11 @@ class GateRule(BaseModel):
         pattern=_NON_BLANK,
         description="The label shown when an upstream change voids the signoff; None takes the usual name",
     )
+
+    @property
+    def is_wave(self) -> bool:
+        """True for a wave gate: marked by the rule, or by the wave-accepted label."""
+        return self.wave or self.label == WAVE_GATE_LABEL
 
 
 class AttestedUpstream(BaseModel):
