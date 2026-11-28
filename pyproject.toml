@@ -29,7 +29,7 @@ opentelemetry-instrumentation-httpx = "^0.63b0"
 opentelemetry-instrumentation-sqlalchemy = "^0.63b0"
 opentelemetry-instrumentation-redis = "^0.63b0"
 temporalio = "^1.8.0"
-sigstore = "^4.6"
+sigstore = "4.6.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"

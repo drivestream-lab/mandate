@@ -18,10 +18,24 @@ from src.business_services.release.evidence_verification_service import (
     read_bundle,
     sha256_hex,
 )
-from src.models.evidence_models import BUNDLE_FILES, EvidenceRefusal, EvidenceTarget
+from src.models.evidence_models import (
+    BUNDLE_FILES,
+    EvidenceArtifact,
+    EvidenceRefusal,
+    EvidenceTarget,
+)
 
 COMMIT = "a" * 40
-TARGET = EvidenceTarget(repository="o/r", commit=COMMIT, test_set=("tests/unit",))
+TARGET = EvidenceTarget(
+    repository="o/r",
+    commit=COMMIT,
+    caller_workflow=".github/workflows/verify.yml",
+    test_set=("tests/unit",),
+    expected_test_set_digest="1" * 64,
+)
+ARTIFACT = EvidenceArtifact(
+    artifact_id=1, run_id=7, run_attempt=1, created_at="2026-11-28T00:00:00Z", size_bytes=10
+)
 
 
 def _files(**changes: str | None) -> dict[str, bytes]:
@@ -115,7 +129,7 @@ def test_the_six_files_of_a_complete_bundle_are_read() -> None:
         ("repository", "o/other", "another repository"),
         ("quarantine", ["tests/unit/test_a.py::test_one"], "quarantine"),
         ("tools_digest", "4" * 64, "tools digest"),
-        ("test_set_digest", "5" * 64, "test-set digest"),
+        ("test_set_digest", "5" * 64, "fixed at spec sign-off"),
     ],
 )
 def test_evidence_that_does_not_match_the_target_is_refused(
@@ -129,7 +143,7 @@ def test_evidence_that_does_not_match_the_target_is_refused(
     files["binding.json"] = json.dumps(binding).encode()
     bundle, _ = read_bundle(_tar(files))
     with pytest.raises(EvidenceRefusal, match=reason):
-        check_binding(bundle, TARGET, "1" * 64, "3" * 64, None)
+        check_binding(bundle, TARGET, "1" * 64, "3" * 64, ARTIFACT)
 
 
 @pytest.mark.req("REQ-61")
@@ -143,7 +157,7 @@ def test_a_failing_report_is_refused() -> None:
     files["binding.json"] = json.dumps(binding).encode()
     bundle, _ = read_bundle(_tar(files))
     with pytest.raises(EvidenceRefusal, match="did not pass"):
-        check_binding(bundle, TARGET, "1" * 64, "3" * 64, None)
+        check_binding(bundle, TARGET, "1" * 64, "3" * 64, ARTIFACT)
 
 
 @pytest.mark.req("REQ-108")

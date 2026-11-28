@@ -3,16 +3,20 @@
 Mandate accepts evidence only when every check below holds; any failure is a hard refusal
 that names its reason, and refused evidence counts as missing:
 
-- the Sigstore bundle verifies, the signer is exactly the pinned workflow at the pinned tag,
-  the signer digest equals the tag's commit read live, and the run's source repository and
-  commit are the target's;
+- the live signer tag still points at the pinned signer commit (a setting; a moved tag is
+  refused and logged as an escalation), the Sigstore bundle verifies, the signer is exactly
+  the pinned workflow at the pinned tag, the signer digest equals the pinned commit, and the
+  run's source repository and commit are the target's;
 - the attested subject is the sha256 of the evidence tarball that was downloaded;
 - the tarball holds exactly the six bundle files, each as hashed in binding.json, and the
   binding, report and environment manifest are for the target commit and consistent;
-- the protected test-set digest equals the one Mandate recomputes from git at that commit, in
-  the format the signer's README documents; the tools digest equals the signer workflow's
-  VERIFY_TOOLS_DIGEST at the tag; the quarantine, test set and plugins are the target's;
-- the result is pass, and the evidence is the latest attempt for the commit.
+- the binding's protected test-set digest equals the digest fixed at spec sign-off, which the
+  caller supplies in the target (the recorded spec signoff), and also the digest Mandate
+  recomputes from git at that commit in the format the signer's README documents; the tools
+  digest equals the signer workflow's VERIFY_TOOLS_DIGEST at the pinned commit; the
+  quarantine, test set and plugins are the target's;
+- the result is pass, and the evidence is for exactly the latest run attempt of the caller
+  workflow for the commit (a newer attempt without evidence, or one that failed, refuses).
 
 worktree_clean_advisory is deliberately not read. The pure checks are module functions so
 they can be tested without GitHub; the class reads GitHub and the signature through the
@@ -139,7 +143,7 @@ def check_binding(
     target: EvidenceTarget,
     recomputed_test_set_digest: str,
     expected_tools_digest: str,
-    artifact: EvidenceArtifact | None,
+    artifact: EvidenceArtifact,
 ) -> None:
     """Compare what the signed run says with what Mandate expects; raise on the first mismatch."""
     binding, report = bundle.binding, bundle.report
@@ -159,13 +163,13 @@ def check_binding(
         raise EvidenceRefusal("the run used another test set or other plugins")
     if binding.quarantine != list(target.quarantine):
         raise EvidenceRefusal("the quarantine list differs from the one on record")
+    if binding.test_set_digest != target.expected_test_set_digest:
+        raise EvidenceRefusal("the test-set digest differs from the one fixed at spec sign-off")
     if binding.test_set_digest != recomputed_test_set_digest:
         raise EvidenceRefusal("the protected test-set digest differs from the one recomputed")
     if binding.tools_digest != expected_tools_digest:
         raise EvidenceRefusal("the tools digest differs from the signer workflow's constant")
-    if artifact is not None and (
-        binding.run_id != str(artifact.run_id) or binding.run_attempt != str(artifact.run_attempt)
-    ):
+    if binding.run_id != str(artifact.run_id) or binding.run_attempt != str(artifact.run_attempt):
         raise EvidenceRefusal("the binding is for another run or attempt than the artifact")
 
 
@@ -180,29 +184,59 @@ class EvidenceVerificationService(BaseBusinessService):
     async def verify(self, target: EvidenceTarget) -> VerifiedEvidence:
         """Fetch the latest evidence for the commit and verify it."""
         try:
-            artifact = await self._attestations.latest_evidence(target.repository, target.commit)
-            if artifact is None:
-                raise EvidenceRefusal("no evidence artifact exists for the commit")
+            artifact = await self._attestations.latest_evidence(
+                target.repository, target.commit, target.caller_workflow
+            )
             tarball = await self._attestations.download_evidence(target.repository, artifact)
         except (AttestationError, ValidationError) as error:
             raise EvidenceRefusal(f"the evidence could not be fetched: {error}") from error
         return await self.verify_bytes(target, tarball, artifact)
 
     async def verify_bytes(
-        self, target: EvidenceTarget, tarball: bytes, artifact: EvidenceArtifact | None
+        self, target: EvidenceTarget, tarball: bytes, artifact: EvidenceArtifact
     ) -> VerifiedEvidence:
-        """Verify this tarball (the downloaded bytes) against the target."""
+        """Verify this tarball (the downloaded bytes) against the target and its artifact."""
         try:
             return await self._verify(target, tarball, artifact)
         except (AttestationError, ValidationError) as error:
             raise EvidenceRefusal(f"the evidence could not be checked: {error}") from error
 
+    async def test_set_digest_at(
+        self, repository: str, commit: str, test_set: Sequence[str], plugins: Sequence[str]
+    ) -> str:
+        """The protected test-set digest of a commit, recomputed from git in the signer's format.
+
+        The recorded spec signoff is the source of the digest a target expects; this is how a
+        digest is computed from a commit (and how Mandate checks the commit under test)."""
+        service = self._attestations
+        tree = await service.tree_blobs(repository, commit)
+        paths = digest_paths(list(tree), test_set)
+        if not paths:
+            raise EvidenceRefusal("the test set matches no tracked file")
+        contents: dict[str, bytes] = {}
+        for path in paths:
+            mode, sha = tree[path]
+            if mode not in _FILE_MODES:
+                raise EvidenceRefusal(f"{path} is not a regular file")
+            contents[path] = await service.blob(repository, sha)
+        return sha256_hex(digest_inputs_text(contents, plugins).encode("utf-8"))
+
     async def _verify(
-        self, target: EvidenceTarget, tarball: bytes, artifact: EvidenceArtifact | None
+        self, target: EvidenceTarget, tarball: bytes, artifact: EvidenceArtifact
     ) -> VerifiedEvidence:
         service = self._attestations
         digest = sha256_hex(tarball)
-        signer_commit = await service.signer_commit()
+        signer_commit = service.settings.signer_commit
+        live = await service.live_tag_commit()
+        if live != signer_commit:
+            tag = service.settings.signer_tag
+            self.logger.error(
+                "evidence escalation: the signer tag moved",
+                tag=tag,
+                live=live,
+                pinned=signer_commit,
+            )
+            raise EvidenceRefusal(f"the {tag} tag moved: it points at {live}, not {signer_commit}")
         bundles = await service.attestations(target.repository, digest)
         if not bundles:
             raise EvidenceRefusal("no attestation exists for the downloaded evidence")
@@ -218,17 +252,9 @@ class EvidenceVerificationService(BaseBusinessService):
         else:
             raise EvidenceRefusal(failures[0])
         bundle, _ = read_bundle(tarball)
-        tree = await service.tree_blobs(target.repository, target.commit)
-        paths = digest_paths(list(tree), target.test_set)
-        if not paths:
-            raise EvidenceRefusal("the test set matches no tracked file")
-        contents: dict[str, bytes] = {}
-        for path in paths:
-            mode, sha = tree[path]
-            if mode not in _FILE_MODES:
-                raise EvidenceRefusal(f"{path} is not a regular file")
-            contents[path] = await service.blob(target.repository, sha)
-        recomputed = sha256_hex(digest_inputs_text(contents, target.plugins).encode("utf-8"))
+        recomputed = await self.test_set_digest_at(
+            target.repository, target.commit, target.test_set, target.plugins
+        )
         expected_tools = await service.signer_tools_digest(signer_commit)
         check_binding(bundle, target, recomputed, expected_tools, artifact)
         binding = bundle.binding

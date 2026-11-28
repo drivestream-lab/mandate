@@ -5,11 +5,18 @@ governed repository, the commit tree and blobs, the live commit of the signer's 
 attestations for a digest, and the Sigstore verification of a bundle. A call that fails, or an
 answer that does not fit the expected shape, raises: nothing is guessed. The signature check
 accepts only the exact signer identity of the pinned workflow, a build signer digest equal to
-the tag's commit, and the target's repository and commit as the run's source.
+the pinned signer commit (a setting; the live tag must still point at it), and the target's
+repository and commit as the run's source.
+
+The run's source commit must be the target commit, so the governed repository's caller
+workflow must run on `push` (under `pull_request`, github.sha is a merge commit and every
+bundle would be refused). The commit's latest run attempt of that workflow decides: the
+evidence must be for exactly that attempt, and a newer attempt without evidence refuses.
 """
 
 import asyncio
 import base64
+import binascii
 import io
 import json
 import re
@@ -60,23 +67,30 @@ class _Ref(_Record):
     object: _Object
 
 
-class _Run(_Record):
+class RunListing(_Record):
     id: int
+    run_attempt: int
+    path: str
+    status: str
+    conclusion: str | None
+    created_at: str
+    run_started_at: str | None = None
 
 
 class _Runs(_Record):
-    workflow_runs: list[_Run]
+    workflow_runs: list[RunListing]
 
 
-class _ArtifactItem(_Record):
+class ArtifactListing(_Record):
     id: int
     name: str
     expired: bool
     created_at: str
+    size_in_bytes: int
 
 
 class _Artifacts(_Record):
-    artifacts: list[_ArtifactItem]
+    artifacts: list[ArtifactListing]
 
 
 class _TreeItem(_Record):
@@ -107,16 +121,47 @@ class _Attestations(_Record):
 _ATTESTATIONS = TypeAdapter(_Attestations)
 
 
+def newest_caller_run(runs: list[RunListing], caller_workflow: str) -> RunListing:
+    """The newest run of the caller workflow for the commit; it must have finished well."""
+    ours = [run for run in runs if run.path == caller_workflow]
+    if not ours:
+        raise EvidenceRefusal(f"no run of {caller_workflow} exists for the commit")
+    run = max(ours, key=lambda r: r.run_started_at or r.created_at)
+    if run.status != "completed":
+        raise EvidenceRefusal(
+            f"the latest run {run.id} (attempt {run.run_attempt}) has not finished"
+        )
+    if run.conclusion != "success":
+        raise EvidenceRefusal(
+            f"the latest run {run.id} (attempt {run.run_attempt}) ended {run.conclusion}"
+        )
+    return run
+
+
+def evidence_item(items: list[ArtifactListing], commit: str, run: RunListing) -> ArtifactListing:
+    """The evidence artifact of exactly the run's current attempt, or a refusal."""
+    name = f"evidence-{commit}-{run.run_attempt}"
+    found = [item for item in items if item.name == name and not item.expired]
+    if len(found) != 1:
+        raise EvidenceRefusal(
+            f"the latest attempt {run.run_attempt} of run {run.id} produced no evidence ({name})"
+        )
+    return found[0]
+
+
 class AttestationService(BaseInfraService):
     """GitHub's evidence, read with a token the caller supplies, and Sigstore's verdict on it."""
 
     def __init__(
-        self, token_provider: TokenProvider, settings: EvidenceSettings | None = None
+        self,
+        token_provider: TokenProvider,
+        settings: EvidenceSettings | None = None,
+        verifier: Verifier | None = None,
     ) -> None:
         self._settings = settings if settings is not None else EvidenceSettings.get_instance()
         self._token_provider = token_provider
         self._client: httpx.AsyncClient | None = None
-        self._verifier: Verifier | None = None
+        self._verifier: Verifier | None = verifier
 
     @property
     def settings(self) -> EvidenceSettings:
@@ -137,13 +182,13 @@ class AttestationService(BaseInfraService):
 
     async def health_check(self) -> bool:
         try:
-            await self.signer_commit()
+            await self.live_tag_commit()
         except (AttestationError, EvidenceRefusal, httpx.HTTPError):
             return False
         return True
 
-    async def signer_commit(self) -> str:
-        """The commit the signer's tag points at right now, read live (a moved tag changes it)."""
+    async def live_tag_commit(self) -> str:
+        """The commit the signer's tag points at right now, read live; it must equal the pin."""
         repo = self._settings.verify_repository
         ref = _Ref.model_validate_json(
             await self._get_bytes(f"/repos/{repo}/git/ref/tags/{self._settings.signer_tag}")
@@ -159,50 +204,50 @@ class AttestationService(BaseInfraService):
     async def signer_tools_digest(self, signer_commit: str) -> str:
         """VERIFY_TOOLS_DIGEST as written in the signer workflow at the tag's commit."""
         repo = self._settings.verify_repository
-        text = (
-            await self._get_bytes(
-                f"/repos/{repo}/contents/{self._settings.workflow_path}",
-                {"ref": signer_commit},
-                raw=True,
-            )
-        ).decode("utf-8")
+        raw = await self._get_bytes(
+            f"/repos/{repo}/contents/{self._settings.workflow_path}",
+            {"ref": signer_commit},
+            raw=True,
+        )
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AttestationError("the signer workflow is not text") from error
         found = _TOOLS_DIGEST_LINE.findall(text)
         if len(found) != 1:
             raise AttestationError("the signer workflow does not state one VERIFY_TOOLS_DIGEST")
         return found[0]
 
-    async def latest_evidence(self, repository: str, commit: str) -> EvidenceArtifact | None:
-        """The newest evidence artifact any run of this commit produced, or None."""
+    async def latest_evidence(
+        self, repository: str, commit: str, caller_workflow: str
+    ) -> EvidenceArtifact:
+        """The evidence of the commit's latest run attempt of the caller workflow, or a refusal."""
         runs = _Runs.model_validate_json(
             await self._get_bytes(
                 f"/repos/{repository}/actions/runs", {"head_sha": commit, "per_page": 100}
             )
         )
-        newest: EvidenceArtifact | None = None
-        for run in runs.workflow_runs:
-            listing = _Artifacts.model_validate_json(
-                await self._get_bytes(
-                    f"/repos/{repository}/actions/runs/{run.id}/artifacts", {"per_page": 100}
-                )
+        run = newest_caller_run(runs.workflow_runs, caller_workflow)
+        listing = _Artifacts.model_validate_json(
+            await self._get_bytes(
+                f"/repos/{repository}/actions/runs/{run.id}/artifacts", {"per_page": 100}
             )
-            for item in listing.artifacts:
-                match = _NAME.fullmatch(item.name)
-                if item.expired or match is None or match["commit"] != commit:
-                    continue
-                candidate = EvidenceArtifact(
-                    artifact_id=item.id,
-                    run_id=run.id,
-                    run_attempt=int(match["attempt"]),
-                    created_at=item.created_at,
-                )
-                if newest is None or candidate.created_at > newest.created_at:
-                    newest = candidate
-        return newest
+        )
+        item = evidence_item(listing.artifacts, commit, run)
+        return EvidenceArtifact(
+            artifact_id=item.id,
+            run_id=run.id,
+            run_attempt=run.run_attempt,
+            created_at=item.created_at,
+            size_bytes=item.size_in_bytes,
+        )
 
     async def download_evidence(self, repository: str, artifact: EvidenceArtifact) -> bytes:
-        """The evidence tarball inside the artifact's zip."""
-        archive = await self._get_bytes(
-            f"/repos/{repository}/actions/artifacts/{artifact.artifact_id}/zip"
+        """The evidence tarball inside the artifact's zip, read with a byte cap."""
+        if artifact.size_bytes > _MAX_ARTIFACT_BYTES:
+            raise EvidenceRefusal("the evidence artifact is too large")
+        archive = await self._get_capped(
+            f"/repos/{repository}/actions/artifacts/{artifact.artifact_id}/zip", _MAX_ARTIFACT_BYTES
         )
         try:
             with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
@@ -231,7 +276,10 @@ class AttestationService(BaseInfraService):
         )
         if item.encoding != "base64":
             raise AttestationError("a blob came in an unexpected encoding")
-        return base64.b64decode(item.content)
+        try:
+            return base64.b64decode(item.content, validate=False)
+        except binascii.Error as error:
+            raise AttestationError("a blob could not be decoded") from error
 
     async def attestations(self, repository: str, subject_digest: str) -> list[dict[str, object]]:
         """Every attestation bundle GitHub holds for this sha256 digest (none: an empty list)."""
@@ -282,6 +330,27 @@ class AttestationService(BaseInfraService):
             self._verifier = Verifier.production()
         _, payload = self._verifier.verify_dsse(bundle, policy)
         return payload
+
+    async def _get_capped(self, path: str, cap: int) -> bytes:
+        """A body read in chunks and refused past the cap, so a huge answer is never held."""
+        if self._client is None:
+            raise AttestationError("the attestation service is not initialised")
+        headers = {
+            "Authorization": f"Bearer {await self._token_provider()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            async with self._client.stream("GET", path, headers=headers) as response:
+                self._raise_for_status(response, path)
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body += chunk
+                    if len(body) > cap:
+                        raise EvidenceRefusal("the evidence download exceeds its size cap")
+                return bytes(body)
+        except httpx.HTTPError as error:
+            raise AttestationError(f"GET {path} failed: {type(error).__name__}") from error
 
     async def _get_bytes(
         self, path: str, params: dict[str, int | str] | None = None, raw: bool = False

@@ -33,9 +33,22 @@ class EvidenceTarget(BaseModel):
 
     repository: str
     commit: str
+    caller_workflow: str
+    """Path of the governed repository's caller workflow, for example
+    .github/workflows/verify.yml; only its runs count as the commit's runs."""
     test_set: tuple[str, ...]
+    expected_test_set_digest: str
+    """The protected test-set digest fixed at spec sign-off, supplied by the caller (the
+    recorded spec signoff). The signed binding must carry exactly this digest."""
     quarantine: tuple[str, ...] = ()
     plugins: tuple[str, ...] = ()
+
+    @field_validator("expected_test_set_digest")
+    @classmethod
+    def _signed_off_digest(cls, value: str) -> str:
+        if not _DIGEST.fullmatch(value):
+            raise ValueError("the expected test-set digest must be a sha256 hex digest")
+        return value
 
     @field_validator("commit")
     @classmethod
@@ -126,6 +139,7 @@ class EvidenceArtifact(BaseModel):
     run_id: int
     run_attempt: int
     created_at: str
+    size_bytes: int
 
 
 class VerifiedEvidence(BaseModel):

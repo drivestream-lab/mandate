@@ -22,6 +22,11 @@ class EvidenceSettings(BaseSettings):
     signer_ref: str = Field(
         default="refs/tags/evidence-1", description="The pinned tag of the signer workflow"
     )
+    signer_commit: str = Field(
+        default="73eac8ac292c1e520b2ce4b2e457e823c38c7fb4",
+        pattern=r"^[0-9a-f]{40}$",
+        description="The commit the signer tag must point at; the trust root is this commit",
+    )
     api_url: str = Field(default="https://api.github.com")
     request_timeout_seconds: float = Field(default=60.0, gt=0)
 
