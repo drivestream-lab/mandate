@@ -18,6 +18,7 @@ from src.engine.gates.voiding_rules import (
     changed_upstreams,
     revised_label,
     approves_on_head,
+    stale_approves_on_head,
     attestation_evidence,
     body_digest,
     pinned_digest,
@@ -156,6 +157,7 @@ def _review(review_id: int, who: str, head: str, state: ReviewStateType) -> Pull
         commit_id=head,
         body="b",
         submitted_at=_NOW + timedelta(seconds=review_id),
+        edited=False,
     )
 
 
@@ -208,3 +210,29 @@ def test_a_decision_is_recorded_under_a_role_that_names_its_own_gate() -> None:
         GateClassType.VERIFICATION, second
     )
     assert decision_role(GateClassType.VERIFICATION, first).startswith("verification decision ")
+
+
+def _attesting(review_id: int, upstream_head: str) -> PullReview:
+    body = (
+        f"attestation:\n  initiative: I\n  head: {_HEAD_A}\n  gate: spec-lgtm\n  repo: r\n"
+        f"  pull_request: 1\n  digests: ['{'c' * 64}']\n  artifact_paths: [p]\n"
+        f"  upstream:\n    - repo: {_UPSTREAM.repo}\n      pull_request: {_UPSTREAM.number}\n"
+        f"      head: {upstream_head}\n"
+    )
+    return _review(review_id, "holder", _HEAD_A, ReviewStateType.APPROVED).model_copy(
+        update={"body": body}
+    )
+
+
+@pytest.mark.req("REQ-121")
+def test_a_stale_void_names_only_approves_not_given_against_the_current_upstream() -> None:
+    snapshot = _snapshot(
+        (
+            _attesting(1, _HEAD_A),
+            _attesting(2, _HEAD_B),
+            _review(3, "holder-c", _HEAD_A, ReviewStateType.APPROVED),
+        )
+    )
+    now = [UpstreamHead(upstream=_UPSTREAM, head_sha=_HEAD_B)]
+    # 1 attests the old head, 2 the current one, 3 is not a readable attestation.
+    assert stale_approves_on_head(snapshot, now) == (1, 3)

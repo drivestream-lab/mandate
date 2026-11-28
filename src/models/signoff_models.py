@@ -51,6 +51,9 @@ class PullReview(BaseModel):
     commit_id: str = Field(pattern=_SHA)
     body: str
     submitted_at: datetime
+    edited: bool = Field(
+        description="True when the body was ever edited, by anyone, or the history could not be read"
+    )
 
 
 class PullRequestSnapshot(BaseModel):
@@ -143,6 +146,7 @@ class SignoffReading(BaseModel):
     label: str
     head_sha: str
     review_id: int
+    edited: bool
     body_digest: str = Field(pattern=r"^[0-9a-f]{64}$", description="SHA-256 of the Approve body")
     signed_at: datetime
     attestation: Attestation

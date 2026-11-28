@@ -161,3 +161,48 @@ async def test_an_approve_body_edited_after_signoff_fails_the_check_and_the_edit
         github_app, downstream.ref, GATE_RULE, STAMP, links=links
     )
     assert after.state is GateDecisionStateType.FAILURE
+
+
+@pytest.mark.req("REQ-121")
+async def test_an_approve_edited_before_the_first_check_is_never_pinned_and_a_fresh_one_passes(
+    postgres: PostgresService,
+    github_app: GitHubAppService,
+    sandbox_desk: SandboxDesk,
+    author_token: str,
+    signer_token: str,
+) -> None:
+    services = Services(postgres)
+    upstream = sandbox_desk.open_pull_request("prd-for-early-edit")
+    downstream = sandbox_desk.open_pull_request("spec-with-early-edit")
+    links = (ArtifactLink(upstream=upstream.ref, downstream=downstream.ref),)
+    downstream.signer_signs(upstream=[(upstream.ref, upstream.head_sha())])
+    changed_head = upstream.author_pushes("prd-moves-before-any-check")
+    snapshot = await github_app.read_pull_request(downstream.ref)
+    review = next(item for item in snapshot.reviews if item.reviewer == SIGNER_LOGIN)
+    assert review.edited is False
+    # The author rewrites the Approve so it attests the new upstream head, before any check ran.
+    edit_review_body(
+        author_token,
+        downstream.ref,
+        review.review_id,
+        downstream.attestation(upstream=[(upstream.ref, changed_head)]),
+    )
+
+    first = await services.check.evaluate_and_post(
+        github_app, downstream.ref, GATE_RULE, STAMP, links=links
+    )
+
+    assert first.state is GateDecisionStateType.FAILURE
+    assert "edited after signoff" in first.reason
+    assert len(await voids_recorded(services, "spec-lgtm attestation edited")) == 1
+    assert await voids_recorded(services, "spec-lgtm attestation") == []
+
+    # The holder approves again against the current upstream head: a fresh review, never edited.
+    downstream.review(
+        signer_token, "APPROVE", downstream.attestation(upstream=[(upstream.ref, changed_head)])
+    )
+    again = await services.check.evaluate_and_post(
+        github_app, downstream.ref, GATE_RULE, STAMP, links=links
+    )
+    assert again.state is GateDecisionStateType.SUCCESS
+    assert len(await voids_recorded(services, "spec-lgtm attestation")) == 1

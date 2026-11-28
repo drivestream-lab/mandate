@@ -14,7 +14,6 @@ from src.models.ledger_models import DecisionRecord, LedgerEntryType
 from src.models.signoff_models import GateDecisionStateType
 from tests.journeys.sign_a_gate.conftest import (
     DESIGN_GATE_RULE,
-    GATE_LABEL,
     GATE_RULE,
     REPO,
     SIGNER_LOGIN,
@@ -51,7 +50,7 @@ async def test_check_fails_until_signed_passes_when_signed_and_fails_after_a_pus
     decisions = [
         e
         for e in entries
-        if e.entry_type == LedgerEntryType.DECISION and e.payload.get("role") == GATE_LABEL
+        if e.entry_type == LedgerEntryType.DECISION and e.payload.get("actor") == SIGNER_LOGIN
     ]
     assert len(decisions) == 1
     record = DecisionRecord.model_validate(decisions[0].payload)
@@ -59,7 +58,7 @@ async def test_check_fails_until_signed_passes_when_signed_and_fails_after_a_pus
 
     # A second check on the same head writes no second decision.
     await services.check.evaluate_and_post(github_app, pull.ref, GATE_RULE, STAMP)
-    assert await services.signoffs_recorded(GATE_LABEL) == 1
+    assert await services.decisions_by(SIGNER_LOGIN) == 1
 
     # The author pushes: the signoff is on the old head, so the new head fails.
     new_head = pull.author_pushes("after-signoff")
@@ -121,7 +120,7 @@ async def test_two_checks_racing_on_one_signoff_write_one_decision(
     )
 
     assert all(o.state is GateDecisionStateType.SUCCESS for o in outcomes)
-    assert await services.signoffs_recorded(GATE_LABEL) == 1
+    assert await services.decisions_by(SIGNER_LOGIN) == 1
 
 
 @pytest.mark.req("REQ-63")

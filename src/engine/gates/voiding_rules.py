@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 from src.engine.gates.non_merge_rules import REQUEST_CHANGES_OPTION
+from src.engine.gates.signoff_rules import read_attestation
 from src.models.gate_models import PullRequestRef
 from src.models.ledger_models import EvidenceReference
 from src.models.signoff_models import (
@@ -97,6 +98,27 @@ def approves_on_head(snapshot: PullRequestSnapshot, head_sha: str) -> tuple[int,
             and review.state in (ReviewStateType.APPROVED, ReviewStateType.DISMISSED)
         )
     )
+
+
+def stale_approves_on_head(
+    snapshot: PullRequestSnapshot, upstream_now: Sequence[UpstreamHead]
+) -> tuple[int, ...]:
+    """The Approves on the head a stale void names: those whose attested upstream heads differ
+    from the current ones, or whose body is not a readable attestation. An Approve already given
+    against the current upstream heads is left alone."""
+    ids: list[int] = []
+    for review in snapshot.reviews:
+        if review.commit_id != snapshot.head_sha or review.state not in (
+            ReviewStateType.APPROVED,
+            ReviewStateType.DISMISSED,
+        ):
+            continue
+        attestation = read_attestation(review.body)
+        if isinstance(attestation, str) or changed_upstreams(
+            attested_upstream_heads(attestation), upstream_now
+        ):
+            ids.append(review.review_id)
+    return tuple(sorted(ids))
 
 
 def without_reviews(

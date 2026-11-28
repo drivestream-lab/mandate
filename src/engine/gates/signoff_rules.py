@@ -108,6 +108,7 @@ def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAsse
                     label=rule.label,
                     head_sha=snapshot.head_sha,
                     review_id=review.review_id,
+                    edited=review.edited,
                     body_digest=hashlib.sha256(review.body.encode()).hexdigest(),
                     signed_at=review.submitted_at,
                     attestation=attestation,

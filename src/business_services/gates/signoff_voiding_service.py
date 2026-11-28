@@ -26,6 +26,7 @@ from src.engine.gates.voiding_rules import (
     revised_role,
     review_evidence,
     approves_on_head,
+    stale_approves_on_head,
     stale_cause,
     stale_failure_reason,
     stale_label,
@@ -121,7 +122,7 @@ class SignoffVoidingService(BaseBusinessService):
             snapshot.head_sha,
             stale_cause(changed, signoff.review_id),
             (f"an upstream change after {signoff.signer} reviewed against it",),
-            review_evidence(approves_on_head(snapshot, snapshot.head_sha))
+            review_evidence(stale_approves_on_head(snapshot, upstream_now))
             + upstream_evidence(changed),
             stamp,
         )

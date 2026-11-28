@@ -87,42 +87,42 @@ class SignoffService(BaseBusinessService):
     ) -> str | None:
         """The reason the signed Approve body is no longer the one first seen, or None.
 
-        The first check pins the SHA-256 of the exact body in the ledger. Every later check
-        compares the live body with it; a difference is recorded as an edit and fails the check,
-        and an edit once recorded for a review fails it for good.
+        An Approve whose body was ever edited, by anyone, is never pinned: the edit is recorded
+        and the check fails. Otherwise the first check pins the SHA-256 of the exact body as
+        Mandate's own record, and every later check compares the live body with it; a difference
+        is recorded as an edit and fails the check. An edit once recorded fails that review for
+        good.
         """
         key = attestation_key(signoff.head_sha, signoff.review_id)
         if await self._ledger.latest_choice(MANDATE_ACTOR, attestation_edited_role(rule), key):
             return EDITED_FAILURE_REASON
+        if signoff.edited:
+            await self._write(signoff, rule, attestation_edited_role(rule), key, "edited", stamp)
+            return EDITED_FAILURE_REASON
         pinned = await self._ledger.latest_decision_record(
-            signoff.signer, attestation_role(rule), key
+            MANDATE_ACTOR, attestation_role(rule), key
         )
         if pinned is None:
             if not may_record:
                 return NOT_PINNED_REASON
-            await self._write(
-                signoff, rule, signoff.signer, attestation_role(rule), key, "pinned", stamp
-            )
+            await self._write(signoff, rule, attestation_role(rule), key, "pinned", stamp)
             return None
         if pinned_digest(pinned.evidence) == signoff.body_digest:
             return None
-        await self._write(
-            signoff, rule, MANDATE_ACTOR, attestation_edited_role(rule), key, "edited", stamp
-        )
+        await self._write(signoff, rule, attestation_edited_role(rule), key, "edited", stamp)
         return EDITED_FAILURE_REASON
 
     async def _write(
         self,
         signoff: SignoffReading,
         rule: GateRule,
-        actor: str,
         role: str,
         key: str,
         choice: str,
         stamp: VersionStamp,
     ) -> None:
         record = DecisionRecord(
-            actor=actor,
+            actor=MANDATE_ACTOR,
             role=role,
             rung=rule.rung,
             options_offered=(DecisionOption(option_id=choice, description=choice),),

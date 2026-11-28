@@ -95,6 +95,50 @@ class _ListedPull(_Record):
     labels: list[_Label]
 
 
+class _EditCount(_Record):
+    totalCount: int
+
+
+class _ReviewEdits(_Record):
+    databaseId: int | None
+    lastEditedAt: datetime | None
+    userContentEdits: _EditCount | None
+
+
+class _EditPageInfo(_Record):
+    hasNextPage: bool
+    endCursor: str | None
+
+
+class _EditedReviews(_Record):
+    pageInfo: _EditPageInfo
+    nodes: list[_ReviewEdits | None]
+
+
+class _EditPull(_Record):
+    reviews: _EditedReviews
+
+
+class _EditRepository(_Record):
+    pullRequest: _EditPull
+
+
+class _EditData(_Record):
+    repository: _EditRepository
+
+
+class _EditAnswer(_Record):
+    data: _EditData | None = None
+    errors: list[dict[str, object]] | None = None
+
+
+_EDIT_QUERY = (
+    "query($owner:String!,$repo:String!,$number:Int!,$after:String){"
+    "repository(owner:$owner,name:$repo){pullRequest(number:$number){"
+    "reviews(first:100,after:$after){pageInfo{hasNextPage endCursor}"
+    "nodes{databaseId lastEditedAt userContentEdits(first:1){totalCount}}}}}}"
+)
+
 _REVIEWS = TypeAdapter(list[_Review])
 _OPEN_PULLS = TypeAdapter(list[_ListedPull])
 
@@ -145,14 +189,52 @@ class GitHubAppService(BaseInfraService):
             if len(batch) < PAGE_SIZE:
                 break
             page += 1
+        edited, listed = await self._edited_reviews(ref)
         return PullRequestSnapshot(
             ref=ref,
             base_ref=pull.base.ref,
             head_sha=pull.head.sha,
             labels=tuple(label.name for label in pull.labels),
             is_draft=pull.draft,
-            reviews=tuple(_to_review(item) for item in reviews),
+            reviews=tuple(
+                _to_review(item, item.id in edited or item.id not in listed) for item in reviews
+            ),
         )
+
+    async def _edited_reviews(self, ref: PullRequestRef) -> tuple[frozenset[int], frozenset[int]]:
+        """The ids of reviews whose body was ever edited (by anyone, a deleted revision included),
+        and the ids GraphQL listed. A review it did not list is treated as edited by the caller:
+        an unreadable history is never clean. A request that fails or answers in another shape
+        raises."""
+        edited: set[int] = set()
+        listed: set[int] = set()
+        cursor: str | None = None
+        while True:
+            body: dict[str, object] = {
+                "query": _EDIT_QUERY,
+                "variables": {
+                    "owner": self._settings.owner,
+                    "repo": ref.repo,
+                    "number": ref.number,
+                    "after": cursor,
+                },
+            }
+            response = await self._send("POST", "/graphql", None, body, True)
+            self._raise_for_status(response, "/graphql")
+            answer = self._parse(_EditAnswer, response)
+            if answer.errors or answer.data is None:
+                raise GitHubError("GitHub did not answer the review edit history")
+            page = answer.data.repository.pullRequest.reviews
+            for node in page.nodes:
+                if node is None or node.databaseId is None:
+                    raise GitHubError("a review's edit history is unreadable")
+                listed.add(node.databaseId)
+                touched = node.userContentEdits is not None and node.userContentEdits.totalCount > 0
+                if node.lastEditedAt is not None or touched:
+                    edited.add(node.databaseId)
+            if not page.pageInfo.hasNextPage:
+                return frozenset(edited), frozenset(listed)
+            cursor = page.pageInfo.endCursor
 
     async def read_head_sha(self, ref: PullRequestRef) -> str:
         """Only the pull request's head commit (when the rest of it cannot be read)."""
@@ -247,9 +329,7 @@ class GitHubAppService(BaseInfraService):
         self._raise_for_status(response, path)
         return response
 
-    async def _post(
-        self, path: str, body: Mapping[str, str | list[str]], repeatable: bool = False
-    ) -> None:
+    async def _post(self, path: str, body: Mapping[str, object], repeatable: bool = False) -> None:
         self._raise_for_status(await self._send("POST", path, None, body, repeatable), path)
 
     async def _send(
@@ -257,7 +337,7 @@ class GitHubAppService(BaseInfraService):
         method: str,
         path: str,
         params: dict[str, int | str] | None,
-        body: Mapping[str, str | list[str]] | None,
+        body: Mapping[str, object] | None,
         repeatable: bool,
     ) -> httpx.Response:
         """One call; a repeatable one is tried again after a dropped connection or a 5xx."""
@@ -300,7 +380,7 @@ class GitHubAppService(BaseInfraService):
             raise GitHubError("unexpected answer from GitHub") from error
 
 
-def _to_review(item: _Review) -> PullReview:
+def _to_review(item: _Review, edited: bool) -> PullReview:
     if item.user is None or item.commit_id is None or item.submitted_at is None:
         raise GitHubError("a review is missing its reviewer, commit or time")
     return PullReview(
@@ -311,6 +391,7 @@ def _to_review(item: _Review) -> PullReview:
         commit_id=item.commit_id,
         body=item.body or "",
         submitted_at=item.submitted_at,
+        edited=edited,
     )
 
 
