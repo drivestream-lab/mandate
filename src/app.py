@@ -1,5 +1,6 @@
 """FastAPI application setup for mandate."""
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from src.common.auth.config import AuthConfig
 from src.common.auth.middleware import AuthMiddleware
 from src.configs.app_settings import AppSettings
 from src.configs.jwt_settings import JWTSettings
+from src.configs.telemetry_settings import TelemetrySettings
 from src.di.dependency_container import (
     close_all_services,
     configure_container,
@@ -24,6 +26,7 @@ from src.exceptions.app_exceptions import BaseAppException
 from src.infra_services.telemetry_service import TelemetryService
 from src.logging import LoggingContext, get_logger, setup_logging
 from src.utils.correlation_id import CorrelationIdMiddleware
+from src.utils.otlp_reachability import warn_if_collector_unreachable
 
 logger = get_logger()
 
@@ -33,6 +36,9 @@ async def lifespan(app: FastAPI):
     startup_correlation_id = str(uuid.uuid4())
     with LoggingContext(startup_correlation_id):
         logger.info("Starting mandate application")
+        await asyncio.to_thread(
+            warn_if_collector_unreachable, TelemetrySettings.get_instance().exporter_otlp_endpoint
+        )
         container = configure_container()
         app.state.container = container
         try:
