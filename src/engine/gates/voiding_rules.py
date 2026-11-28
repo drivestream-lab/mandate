@@ -8,7 +8,6 @@ shows the state.
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from typing import NamedTuple
 
 from src.engine.gates.non_merge_rules import REQUEST_CHANGES_OPTION
@@ -16,6 +15,7 @@ from src.models.gate_models import PullRequestRef
 from src.models.ledger_models import EvidenceReference
 from src.models.signoff_models import (
     Attestation,
+    MANDATE_ACTOR,
     GateRule,
     PullRequestSnapshot,
     ReviewStateType,
@@ -26,6 +26,7 @@ GATE_LABEL_SUFFIX = "-lgtm"
 WAVE_GATE_LABEL = "wave-accepted"
 WAVE_STEM = "wave"
 UPSTREAM_EVIDENCE_KIND = "upstream-head"
+VOIDED_REVIEW_EVIDENCE_KIND = "voided-review"
 
 
 def _stem(label: str) -> str:
@@ -47,13 +48,19 @@ def stale_label(rule: GateRule) -> str:
 
 
 def revised_role(rule: GateRule) -> str:
-    """The role Mandate records a revised void under."""
-    return revised_label(rule)
+    """The role Mandate records a revised void under: keyed on the gate's own label, never on
+    the display label, so renaming a display label hides no earlier void."""
+    return f"{rule.label} revised"
 
 
 def stale_role(rule: GateRule) -> str:
-    """The role Mandate records a stale void under."""
-    return stale_label(rule)
+    """The role Mandate records a stale void under, keyed on the gate's own label."""
+    return f"{rule.label} stale"
+
+
+def is_mandate_actor(actor: str) -> bool:
+    """True only for the name Mandate records its own entries under."""
+    return actor == MANDATE_ACTOR
 
 
 def pull_key(ref: PullRequestRef) -> str:
@@ -65,7 +72,7 @@ class EarlierApprove(NamedTuple):
 
     reviewer: str
     head_sha: str
-    submitted_at: datetime
+    review_id: int
 
 
 def earlier_approves(snapshot: PullRequestSnapshot, rule: GateRule) -> tuple[EarlierApprove, ...]:
@@ -81,15 +88,49 @@ def earlier_approves(snapshot: PullRequestSnapshot, rule: GateRule) -> tuple[Ear
             and review.commit_id != snapshot.head_sha
             and review.reviewer in rule.holders
         ):
-            found.append(EarlierApprove(review.reviewer, review.commit_id, review.submitted_at))
+            found.append(EarlierApprove(review.reviewer, review.commit_id, review.review_id))
     return tuple(found)
 
 
-def revised_cause(earlier: EarlierApprove, new_head: str) -> str:
-    """Why a signoff is void; each signoff voided by each new head is its own cause."""
-    return (
-        f"voided: the signoff of {earlier.submitted_at.isoformat()} " f"does not cover {new_head}"
+def voided_reviews_of(
+    earlier: Sequence[EarlierApprove], reviewer: str, head_sha: str
+) -> tuple[int, ...]:
+    """The ids of the Approves a new commit voids: the signer's Approves on the voided head."""
+    return tuple(
+        sorted(
+            {
+                item.review_id
+                for item in earlier
+                if item.reviewer == reviewer and item.head_sha == head_sha
+            }
+        )
     )
+
+
+def review_evidence(review_ids: Sequence[int]) -> tuple[EvidenceReference, ...]:
+    """The Approve reviews a void covers, as ledger evidence."""
+    items: list[EvidenceReference] = []
+    for review_id in review_ids:
+        reference = f"review {review_id}"
+        digest = hashlib.sha256(reference.encode()).hexdigest()
+        items.append(
+            EvidenceReference(kind=VOIDED_REVIEW_EVIDENCE_KIND, reference=reference, digest=digest)
+        )
+    return tuple(items)
+
+
+def voided_review_ids(evidence: Sequence[EvidenceReference]) -> frozenset[int]:
+    """The review ids a void's evidence names."""
+    return frozenset(
+        int(item.reference.removeprefix("review "))
+        for item in evidence
+        if item.kind == VOIDED_REVIEW_EVIDENCE_KIND
+    )
+
+
+def revised_cause(review_ids: Sequence[int], new_head: str) -> str:
+    """Why a signoff is void; the Approves it voided and the head that voided them."""
+    return f"voided: reviews {', '.join(str(i) for i in review_ids)} do not cover {new_head}"
 
 
 def upstream_evidence(heads: Sequence[UpstreamHead]) -> tuple[EvidenceReference, ...]:
@@ -116,9 +157,9 @@ def changed_upstreams(
     return tuple(head for head in now if attested.get(pull_key(head.upstream)) != head.head_sha)
 
 
-def stale_cause(changed: Sequence[UpstreamHead], signed_at: datetime) -> str:
+def stale_cause(changed: Sequence[UpstreamHead], review_id: int) -> str:
     named = ", ".join(f"{pull_key(head.upstream)}@{head.head_sha}" for head in changed)
-    return f"voided: the signoff of {signed_at.isoformat()} was not given against {named}"
+    return f"voided: review {review_id} was not given against {named}"
 
 
 def stale_failure_reason(label: str) -> str:
@@ -126,17 +167,12 @@ def stale_failure_reason(label: str) -> str:
 
 
 def void_failure_reason(label: str) -> str:
-    return f"{label}: this head carries a void; the holder must sign it again"
+    return f"{label}: the Approve on this head was voided; the holder must approve it again"
 
 
-def signoff_follows_void(signed_at: datetime, void_at: datetime | None) -> bool:
-    """True when there is no void for this head, or the holder signed strictly after it."""
-    return void_at is None or signed_at > void_at
-
-
-def latest_time(times: Sequence[datetime | None]) -> datetime | None:
-    found = [moment for moment in times if moment is not None]
-    return max(found) if found else None
+def signoff_is_voided(review_id: int, voided: frozenset[int]) -> bool:
+    """True when the Approve behind the signoff is one a void on this head names."""
+    return review_id in voided
 
 
 def unresolved_no(choices_newest_first: Sequence[str | None]) -> bool:

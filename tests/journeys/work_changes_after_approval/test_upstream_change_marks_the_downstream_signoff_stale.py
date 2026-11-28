@@ -48,7 +48,7 @@ async def test_an_upstream_change_applies_stale_and_the_downstream_is_signed_aga
     posted = downstream.gate_decision()
     assert posted is not None and posted.state == "failure"
     assert "spec-stale" in (await github_app.read_pull_request(downstream.ref)).labels
-    voids = await voids_recorded(services, "spec-stale")
+    voids = await voids_recorded(services, "spec-lgtm stale")
     assert len(voids) == 1 and voids[0].target_version == signed_head
     assert upstream_head in voids[0].choice
 
@@ -93,7 +93,7 @@ async def test_an_upstream_pushed_before_the_first_check_still_makes_the_signoff
     )
 
     assert first.state is GateDecisionStateType.FAILURE and "spec-stale" in first.reason
-    voids = await voids_recorded(services, "spec-stale")
+    voids = await voids_recorded(services, "spec-lgtm stale")
     assert len(voids) == 1 and upstream_head in voids[0].choice
 
 

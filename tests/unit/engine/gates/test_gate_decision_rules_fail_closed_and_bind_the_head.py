@@ -41,6 +41,7 @@ _SIGNOFF = SignoffReading(
     signer="x",
     label="spec-lgtm",
     head_sha=_HEAD,
+    review_id=1,
     signed_at=datetime(2026, 11, 27, tzinfo=UTC),
     attestation=Attestation(
         initiative="I",

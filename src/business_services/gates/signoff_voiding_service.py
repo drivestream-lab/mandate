@@ -20,12 +20,14 @@ from src.engine.gates.voiding_rules import (
     attested_upstream_heads,
     changed_upstreams,
     heads_newest_first,
-    latest_time,
     recorded_no_failure_reason,
     revised_cause,
     revised_label,
     revised_role,
-    signoff_follows_void,
+    signoff_is_voided,
+    review_evidence,
+    voided_review_ids,
+    voided_reviews_of,
     stale_cause,
     stale_failure_reason,
     stale_label,
@@ -85,13 +87,16 @@ class SignoffVoidingService(BaseBusinessService):
             )
             if recorded != SIGNOFF_CHOICE:
                 continue
+            review_ids = voided_reviews_of(
+                earlier_approves(snapshot, rule), earlier.reviewer, earlier.head_sha
+            )
             await self._record(
                 rule,
                 revised_role(rule),
                 earlier.head_sha,
-                revised_cause(earlier, snapshot.head_sha),
+                revised_cause(review_ids, snapshot.head_sha),
                 (f"{earlier.reviewer}'s recorded signoff on {earlier.head_sha} no longer holds",),
-                (),
+                review_evidence(review_ids),
                 stamp,
             )
             await self._label(github, snapshot, revised_label(rule))
@@ -119,9 +124,9 @@ class SignoffVoidingService(BaseBusinessService):
             rule,
             stale_role(rule),
             snapshot.head_sha,
-            stale_cause(changed, signoff.signed_at),
+            stale_cause(changed, signoff.review_id),
             (f"an upstream change after {signoff.signer} reviewed against it",),
-            upstream_evidence(changed),
+            review_evidence((signoff.review_id,)) + upstream_evidence(changed),
             stamp,
         )
         await self._label(github, snapshot, stale_label(rule))
@@ -130,17 +135,18 @@ class SignoffVoidingService(BaseBusinessService):
     async def void_failure(
         self, snapshot: PullRequestSnapshot, signoff: SignoffReading, rule: GateRule
     ) -> str | None:
-        """The reason a void on this head still stands, or None.
+        """The reason the Approve behind this signoff was voided, or None.
 
-        A head carrying a revised or stale void needs a signoff given after the void, even when
-        the head is a commit that was signed before.
+        A head carrying a void passes only on an Approve that no void on this head names, so a
+        branch moved back to a commit that was signed before needs a new Approve.
         """
-        head = snapshot.head_sha
-        times: list[datetime | None] = []
+        voided: set[int] = set()
         for role in (revised_role(rule), stale_role(rule)):
-            record = await self._ledger.latest_decision_record(MANDATE_ACTOR, role, head)
-            times.append(None if record is None else record.decided_at)
-        if signoff_follows_void(signoff.signed_at, latest_time(times)):
+            for record in await self._ledger.decision_records(
+                MANDATE_ACTOR, role, snapshot.head_sha
+            ):
+                voided |= voided_review_ids(record.evidence)
+        if not signoff_is_voided(signoff.review_id, frozenset(voided)):
             return None
         return void_failure_reason(revised_label(rule))
 

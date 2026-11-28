@@ -142,6 +142,7 @@ class SignoffReading(BaseModel):
     signer: str
     label: str
     head_sha: str
+    review_id: int
     signed_at: datetime
     attestation: Attestation
 
@@ -192,8 +193,9 @@ class RecheckReport(BaseModel):
     escalations: tuple[EscalationNote, ...]
 
 
-MANDATE_ACTOR = "mandate"
-"""Who the ledger names for what Mandate itself records, such as a voided signoff."""
+MANDATE_ACTOR = "mandate[app]"
+"""Who the ledger names for what Mandate itself records, such as a voided signoff. No GitHub
+login can contain brackets, so no account can be mistaken for it."""
 
 
 class ArtifactLink(BaseModel):

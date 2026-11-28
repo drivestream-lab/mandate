@@ -4,8 +4,10 @@ Void label names come with the gate (the wave gate has its own), the stale basel
 holder attested, a void needs a later signoff, and a no belongs to its decision and its holder.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import uuid4
+
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -15,7 +17,12 @@ from src.engine.gates.voiding_rules import (
     attested_upstream_heads,
     changed_upstreams,
     revised_label,
-    signoff_follows_void,
+    is_mandate_actor,
+    revised_role,
+    signoff_is_voided,
+    stale_role,
+    voided_review_ids,
+    review_evidence,
     stale_label,
     unresolved_no,
 )
@@ -24,6 +31,7 @@ from src.models.ledger_models import RungType
 from src.models.signoff_models import (
     Attestation,
     AttestedUpstream,
+    MANDATE_ACTOR,
     GateRule,
     UpstreamHead,
 )
@@ -105,11 +113,31 @@ def test_an_attested_upstream_with_an_extra_field_is_refused() -> None:
 
 
 @pytest.mark.req("REQ-42")
-def test_a_void_stands_until_the_holder_signs_strictly_after_it() -> None:
-    assert signoff_follows_void(_NOW, None) is True
-    assert signoff_follows_void(_NOW + timedelta(seconds=1), _NOW) is True
-    assert signoff_follows_void(_NOW, _NOW) is False
-    assert signoff_follows_void(_NOW - timedelta(seconds=5), _NOW) is False
+def test_an_approve_named_by_a_void_does_not_count_and_a_new_one_does() -> None:
+    voided = voided_review_ids(review_evidence((11, 12)))
+    assert voided == frozenset({11, 12})
+    assert signoff_is_voided(11, voided) is True
+    assert signoff_is_voided(13, voided) is False
+    assert voided_review_ids(()) == frozenset()
+
+
+@pytest.mark.req("REQ-42")
+def test_void_roles_follow_the_gates_own_label_not_its_display_labels() -> None:
+    plain = _rule("spec-lgtm")
+    renamed = _rule("spec-lgtm", revised="spec-redo", stale="spec-old")
+    short = _rule("spec")
+    assert revised_role(plain) == revised_role(renamed) == "spec-lgtm revised"
+    assert stale_role(plain) == stale_role(renamed) == "spec-lgtm stale"
+    assert revised_role(short) != revised_role(plain)
+
+
+@pytest.mark.req("REQ-42")
+def test_no_github_login_can_be_taken_for_mandate() -> None:
+    login = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$")
+    assert is_mandate_actor(MANDATE_ACTOR)
+    assert login.fullmatch(MANDATE_ACTOR) is None
+    for account in ("mandate", "Mandate", "mandate[bot]", "mandate-app"):
+        assert not is_mandate_actor(account)
 
 
 @pytest.mark.req("REQ-121")
@@ -125,4 +153,4 @@ def test_a_decision_is_recorded_under_a_role_that_names_its_own_gate() -> None:
     assert decision_role(GateClassType.VERIFICATION, first) != decision_role(
         GateClassType.VERIFICATION, second
     )
-    assert decision_role(GateClassType.VERIFICATION, None) == "verification decision"
+    assert decision_role(GateClassType.VERIFICATION, first).startswith("verification decision ")
