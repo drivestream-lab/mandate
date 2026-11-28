@@ -1,0 +1,10 @@
+diff --git a/src/business_services/toy_greeting___RUN__.py b/src/business_services/toy_greeting___RUN__.py
+new file mode 100644
+--- /dev/null
++++ b/src/business_services/toy_greeting___RUN__.py
+@@ -0,0 +1,5 @@
++"""A toy greeting, the change the walking skeleton's wave carries."""
++
++
++def greet(name: str) -> str:
++    return f"Hello, {name}"
