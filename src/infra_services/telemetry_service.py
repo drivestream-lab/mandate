@@ -52,6 +52,31 @@ def collector_address(endpoint: str) -> Optional[tuple[str, int]]:
     return host, port or (443 if parsed.scheme == "https" else 4318)
 
 
+def check_collector(endpoint: str, timeout: float = 2.0) -> bool:
+    """Log one warning when telemetry cannot be exported; return True when it can.
+
+    Telemetry is not on the gate path, so the service starts either way. Only the host and
+    port are logged: the endpoint may carry credentials.
+    """
+    address = collector_address(endpoint)
+    if address is None:
+        logger.warning(
+            "Telemetry export is off: OTEL_EXPORTER_OTLP_ENDPOINT is empty or not a valid URL"
+        )
+        return False
+    try:
+        with socket.create_connection(address, timeout=timeout):
+            return True
+    except (OSError, ValueError) as error:
+        logger.warning(
+            "Telemetry collector is unreachable; the service runs without exported telemetry",
+            host=address[0],
+            port=address[1],
+            error=str(error),
+        )
+        return False
+
+
 class TelemetryService(BaseInfraService):
     """Infra service that owns OpenTelemetry SDK lifecycle and instrumentation."""
 
@@ -105,29 +130,9 @@ class TelemetryService(BaseInfraService):
         self._initialized = True
         logger.info("TelemetryService initialized")
 
-    def warn_if_collector_unreachable(self, timeout: float = 2.0) -> bool:
-        """Log one warning when telemetry cannot be exported; return True when it can.
-
-        Telemetry is not on the gate path, so the service starts either way. Only the host and
-        port are logged: the endpoint may carry credentials.
-        """
-        address = collector_address(self._settings.exporter_otlp_endpoint)
-        if address is None:
-            logger.warning(
-                "Telemetry export is off: OTEL_EXPORTER_OTLP_ENDPOINT is empty or not a valid URL"
-            )
-            return False
-        try:
-            with socket.create_connection(address, timeout=timeout):
-                return True
-        except OSError as error:
-            logger.warning(
-                "Telemetry collector is unreachable; the service runs without exported telemetry",
-                host=address[0],
-                port=address[1],
-                error=str(error),
-            )
-            return False
+    def warn_if_collector_unreachable(self) -> bool:
+        """Check the configured collector once; see check_collector."""
+        return check_collector(self._settings.exporter_otlp_endpoint)
 
     async def close(self) -> None:
         """Shutdown telemetry providers and remove instrumentation."""
