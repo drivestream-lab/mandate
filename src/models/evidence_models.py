@@ -157,6 +157,8 @@ class VerifiedEvidence(BaseModel):
     dependencies_digest: str
     signer_identity: str
     signer_digest: str
+    """The mandate-verify commit (main's head, read live) the evidence was trusted under;
+    the ledger entry for the decision carries it."""
 
 
 class WaveEvidenceSpec(BaseModel):
