@@ -73,7 +73,14 @@ from src.models.gate_models import (
     PullRequestRef,
 )
 from src.models.kernel_models import VersionStamp
-from src.models.ledger_models import EvidenceReference, LedgerEntryType, RungType, SealedCallRecord
+from src.models.ledger_models import (
+    DecisionOption,
+    DecisionRecord,
+    EvidenceReference,
+    LedgerEntryType,
+    RungType,
+    SealedCallRecord,
+)
 from src.models.paperclip_models import NewIssue
 from src.models.role_output_models import DecidingRoleCall
 from src.models.signoff_models import (
@@ -82,6 +89,7 @@ from src.models.signoff_models import (
     AttestedUpstream,
     DecisionLink,
     GateRule,
+    MANDATE_ACTOR,
 )
 from src.models.sweep_models import SweepConfig
 from src.models.workflow_activity_models import (
@@ -97,10 +105,14 @@ from src.models.workflow_activity_models import (
 )
 from src.models.signoff_models import GOVERNED_BRANCHES
 
-PRD_GATE_LABEL = "spec-lgtm"
+PRD_GATE_LABEL = "impact-map-lgtm"
 WAVE_GATE_LABEL = "wave-accepted"
 VERIFIER_COMMIT_EVIDENCE = "mandate-verify-commit"
 EVIDENCE_RUN_EVIDENCE = "evidence-run"
+WORK_ITEM_PIN_ROLE = "work-item-pin"
+GATE_OPENED_ROLE = "skeleton-gate-opened"
+UPSTREAM_HEAD_EVIDENCE = "upstream-head-at-open"
+HEAD_MOVED = "head_moved"
 EVIDENCE_BLOCK = re.compile(r"```wave-evidence\n(?P<body>.*?)\n```", re.DOTALL)
 _EVIDENCE_ATTEMPTS = 3
 _MOVED_SIGNER = "is now"
@@ -178,7 +190,8 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
     # The work item lives in Paperclip.
 
     async def file_work_item(self, item: SkeletonWorkItem) -> str:
-        """File the work item as a Paperclip issue (its description is the item) and return the id."""
+        """File the work item as a Paperclip issue (its description is the item), pin the SHA-256
+        of that description in the ledger, and return the issue id."""
         step = "file-work-item"
         run = await self._paperclip.open_run(str(item.work_item_id), step)
         issue = await self._paperclip.create_issue(
@@ -190,12 +203,45 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
                 description=item.model_dump_json(),
             ),
         )
+        description = issue.description or ""
+        if SkeletonWorkItem.model_validate_json(description) != item:
+            raise SkeletonError("Paperclip did not keep the work item as filed")
+        await self._ledger.record_decision_once(
+            DecisionRecord(
+                actor=MANDATE_ACTOR,
+                role=WORK_ITEM_PIN_ROLE,
+                rung=RungType.L2,
+                options_offered=(DecisionOption(option_id="pinned", description="Pinned"),),
+                choice="pinned",
+                reasons=("the work item as filed in Paperclip",),
+                evidence=(
+                    EvidenceReference(
+                        kind="work-item-digest",
+                        reference=f"paperclip issue {issue.id}",
+                        digest=_sha256(description),
+                    ),
+                ),
+                target_version=issue.id,
+                workflow_version=_STEP_WORKFLOW,
+                model_version="mandate-rules",
+                decided_at=datetime.now(UTC),
+            ),
+            self._wiring.stamp,
+            "the work item was filed again",
+        )
         return issue.id
 
     async def _item(self, issue_id: str) -> SkeletonWorkItem:
+        """The work item, only if its description is still the one pinned when it was filed."""
         issue = await self._paperclip.get_issue(issue_id)
+        description = issue.description or ""
+        pinned = await self._ledger.latest_decision_record(
+            MANDATE_ACTOR, WORK_ITEM_PIN_ROLE, issue_id
+        )
+        if pinned is None or [e.digest for e in pinned.evidence] != [_sha256(description)]:
+            raise SkeletonError("the work item was edited after it was filed, or never pinned")
         try:
-            return SkeletonWorkItem.model_validate_json(issue.description or "")
+            return SkeletonWorkItem.model_validate_json(description)
         except ValidationError as error:
             raise SkeletonError("the work item in Paperclip cannot be read") from error
 
@@ -255,6 +301,7 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
         stage: SkeletonStageType,
         rule: GateRule,
         head: str,
+        upstream_heads: dict[str, str],
     ) -> Attestation:
         ref = self._pull(item, stage)
         paths = (item.prd_path,) if stage is SkeletonStageType.PRD else item.wave_paths
@@ -265,7 +312,7 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
                 AttestedUpstream(
                     repo=item.prd_pull.repo,
                     pull_request=item.prd_pull.number,
-                    head=await self._github.read_head_sha(item.prd_pull),
+                    head=upstream_heads[f"{item.prd_pull.repo}#{item.prd_pull.number}"],
                 ),
             )
         return Attestation(
@@ -319,14 +366,31 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
 
     # Ledger reads.
 
-    async def _sealed_call(self, gate_id: UUID) -> DecidingRoleCall | None:
+    async def _sealed(self, gate_id: UUID) -> SealedCallRecord:
         async with self._postgres.get_session() as session:
             entry = await self._ledger_repository.find_by_type_and_gate(
                 session, LedgerEntryType.SEALED_CALL, gate_id
             )
         if entry is None:
             raise SkeletonError("no call was sealed for this gate")
-        return SealedCallRecord.model_validate(entry.payload).call
+        return SealedCallRecord.model_validate(entry.payload)
+
+    async def _sealed_call(self, gate_id: UUID) -> DecidingRoleCall | None:
+        return (await self._sealed(gate_id)).call
+
+    async def _upstream_heads_at_open(self, gate_id: UUID) -> dict[str, str]:
+        """The upstream heads the deciding role's gate was opened against (repo#n to head)."""
+        record = await self._ledger.latest_decision_record(
+            MANDATE_ACTOR, GATE_OPENED_ROLE, str(gate_id)
+        )
+        if record is None:
+            raise SkeletonError("no record of what the gate was opened against")
+        found: dict[str, str] = {}
+        for evidence in record.evidence:
+            if evidence.kind == UPSTREAM_HEAD_EVIDENCE:
+                name, _, head = evidence.reference.partition("@")
+                found[name] = head
+        return found
 
     # Steps.
 
@@ -381,6 +445,35 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
         opened = await self._opening.open_gate(
             item.work_item_id, brief, ref, self._wiring.roles, self._github, self._wiring.stamp
         )
+        upstream = (
+            ()
+            if stage is SkeletonStageType.PRD
+            else (
+                EvidenceReference(
+                    kind=UPSTREAM_HEAD_EVIDENCE,
+                    reference=f"{item.prd_pull.repo}#{item.prd_pull.number}@"
+                    f"{await self._github.read_head_sha(item.prd_pull)}",
+                    digest=_sha256(f"{item.prd_pull.repo}#{item.prd_pull.number}"),
+                ),
+            )
+        )
+        await self._ledger.record_decision_once(
+            DecisionRecord(
+                actor=MANDATE_ACTOR,
+                role=GATE_OPENED_ROLE,
+                rung=RungType.L2,
+                options_offered=(DecisionOption(option_id="opened", description="Opened"),),
+                choice="opened",
+                reasons=(f"{stage.value} gate opened on {head}",),
+                evidence=upstream,
+                target_version=str(opened.gate_id),
+                workflow_version=_STEP_WORKFLOW,
+                model_version="mandate-rules",
+                decided_at=datetime.now(UTC),
+            ),
+            self._wiring.stamp,
+            "the gate was opened again",
+        )
         call = await self._sealed_call(opened.gate_id)
         shown = False
         if call is not None:
@@ -423,12 +516,23 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
         ref = self._pull(item, stage)
         rule = await self._rule(item, stage)
         stamp = self._wiring.stamp
-        call = await self._sealed_call(gate_id)
+        sealed = await self._sealed(gate_id)
+        call = sealed.call
         if call is None:
             return _not_settled("the gate has no sealed call, so no decision is recorded")
         if call.option not in (APPROVE_CHOICE, REQUEST_CHANGES_CHOICE):
             raise SkeletonError(f"the sealed call picks {call.option}, which is not an option")
         head = await self._github.read_head_sha(ref)
+        if head != sealed.head_sha:
+            return GateSettled(
+                state=HEAD_MOVED,
+                reason=f"the deciding role called on {sealed.head_sha} and the pull request is "
+                f"now at {head}; the role must call again on the new head",
+                head_sha=head,
+                merge_commit=None,
+                evidence_commit=None,
+            )
+        upstream_heads = await self._upstream_heads_at_open(gate_id)
         checker = _RecordingChecker(self._evidence)
         wave: WaveEvidence | None = None
         if stage is SkeletonStageType.WAVE:
@@ -438,7 +542,7 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
             refusal = await self._verify_evidence(wave, rule, head, checker)
             if refusal is not None:
                 return _not_settled(refusal, head)
-        attestation = await self._attestation(item, stage, rule, head)
+        attestation = await self._attestation(item, stage, rule, head, upstream_heads)
         record = merge_decision_record(rule, ref, attestation, call.option, datetime.now(UTC))
         accepted = checker.accepted
         if accepted is not None:

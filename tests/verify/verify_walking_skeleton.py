@@ -31,6 +31,7 @@ import uuid  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
 from collections.abc import AsyncIterator  # noqa: E402
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 from temporalio.client import Client  # noqa: E402
 from temporalio.contrib.pydantic import pydantic_data_converter  # noqa: E402
@@ -58,6 +59,7 @@ from src.business_services.runner.walking_skeleton_runner_service import (  # no
     VERIFIER_COMMIT_EVIDENCE,
     PRD_GATE_LABEL,
     WAVE_GATE_LABEL,
+    SkeletonError,
     SkeletonWiring,
     WalkingSkeletonRunnerService,
 )
@@ -129,6 +131,7 @@ from tests.journeys.release_a_wave.support import (  # noqa: E402
 )
 from tests.journeys.sign_a_gate.conftest import github_app, mandate_token  # noqa: E402,F401
 from tests.journeys.sign_a_gate.support import STAMP  # noqa: E402
+from tests.contract.paperclip.paperclip_stack import MandateIdentity  # noqa: E402
 from tests.journeys.test_agents.conftest import (  # noqa: E402,F401
     AgentDesk,
     agent_host,
@@ -215,8 +218,20 @@ def _commit(repo: str, token: str, branch: str, path: str, text: str) -> str:
         return str(reply.json()["commit"]["sha"])
 
 
-def _everything_on(repo: str, token: str, number: int) -> str:
-    """The body, every comment, review and review comment of a pull request, as one text."""
+def _statuses(repo: str, token: str, sha: str) -> list[tuple[str, str, datetime]]:
+    """Every mandate/gate-decision posted on a commit, newest first: state, description, time."""
+    with client(repo, token) as http:
+        reply = http.get(f"/commits/{sha}/statuses", params={"per_page": 100}).raise_for_status()
+    return [
+        (str(s["state"]), str(s.get("description") or ""), datetime.fromisoformat(s["created_at"]))
+        for s in reply.json()
+        if s["context"] == "mandate/gate-decision"
+    ]
+
+
+def _everything_on(repo: str, token: str, number: int, shas: tuple[str, ...]) -> str:
+    """Everything visible on a pull request: body, comments, reviews, review comments, labels,
+    the statuses of the given commits and the merge commit messages."""
     parts: list[str] = []
     with client(repo, token) as http:
         parts.append(str(http.get(f"/pulls/{number}").raise_for_status().json().get("body") or ""))
@@ -224,14 +239,26 @@ def _everything_on(repo: str, token: str, number: int) -> str:
                      f"/pulls/{number}/comments"):  # fmt: skip
             listing = http.get(path, params={"per_page": 100}).raise_for_status().json()
             parts += [str(item.get("body") or "") for item in listing]
+        issue = http.get(f"/issues/{number}").raise_for_status().json()
+        parts += [str(label["name"]) for label in issue["labels"]]
+        for sha in shas:
+            parts.append(
+                str(http.get(f"/commits/{sha}").raise_for_status().json()["commit"]["message"])
+            )
+    parts += [description for sha in shas for _, description, _ in _statuses(repo, token, sha)]
     return "\n".join(parts)
 
 
-def _gate_status(repo: str, token: str, sha: str) -> str | None:
-    with client(repo, token) as http:
-        reply = http.get(f"/commits/{sha}/status").raise_for_status().json()
-    found = [s["state"] for s in reply["statuses"] if s["context"] == "mandate/gate-decision"]
-    return found[0] if found else None
+def _board_edits_description(identity: MandateIdentity, issue_id: str, text: str) -> None:
+    """A board user edits an issue's description in Paperclip."""
+    with httpx.Client(
+        base_url=identity.base_url, headers={"Origin": identity.base_url}, timeout=60
+    ) as board:
+        board.post(
+            "/api/auth/sign-in/email",
+            json={"email": identity.board_email, "password": identity.board_password},
+        ).raise_for_status()
+        board.patch(f"/api/issues/{issue_id}", json={"description": text}).raise_for_status()
 
 
 async def _entries(postgres: PostgresService) -> list[StoredLedgerEntry]:
@@ -307,6 +334,7 @@ async def runner(
 @pytest.mark.req("REQ-122")
 async def test_a_toy_prd_and_a_toy_wave_are_signed_verified_and_merged_end_to_end(
     runner: WalkingSkeletonRunnerService,
+    mandate_identity: MandateIdentity,
     postgres: PostgresService,
     github_app: GitHubAppService,
     journey_stack: StackAddresses,
@@ -318,7 +346,6 @@ async def test_a_toy_prd_and_a_toy_wave_are_signed_verified_and_merged_end_to_en
     author_token: str,
     mandate_token: str,
 ) -> None:
-    del runner
     run = run_namespace.run_id
     prd_path = f"prd/toy-prd-{run}.md"
     caller_path = f".github/workflows/walking-skeleton-{run}.yml"
@@ -365,7 +392,32 @@ async def test_a_toy_prd_and_a_toy_wave_are_signed_verified_and_merged_end_to_en
         baselines=(await live_baseline(github_app, META), await live_baseline(github_app, SVC)),
     )
     signer_head_before = await attestations.signer_head()
+    moved_branch = sandbox_github.create_branch(META, "toy-prd-moved")
+    _commit(META, author_token, moved_branch, prd_path, prd_text)
+    moved = open_pull(META, moved_branch, author_token, "", mandate_token, f"[{run}] moved", True)
     try:
+        # An edited work item stops the next step.
+        edited = await runner.file_work_item(item.model_copy(update={"work_item_id": uuid.uuid4()}))
+        _board_edits_description(mandate_identity, edited, "{}")
+        with pytest.raises(SkeletonError, match="work item was edited"):
+            await runner.sweep_governed_branches(edited)
+
+        # A push between open and settle: the role called on another head, so nothing is signed.
+        moved_issue = await runner.file_work_item(
+            item.model_copy(update={"work_item_id": uuid.uuid4(), "prd_pull": moved.ref})
+        )
+        opened = await runner.open_gate(moved_issue, SkeletonStageType.PRD)
+        pushed = moved.author_pushes("after-the-call")
+        refused = await runner.settle_gate(moved_issue, SkeletonStageType.PRD, opened.gate_id, None)
+        assert refused.state == "head_moved" and refused.head_sha == pushed, refused
+        assert pull_state(META, mandate_token, moved.ref.number) == "open"
+        reviews = _everything_on(META, mandate_token, moved.ref.number, (pushed,))
+        assert "approve" not in reviews.lower() and PRD_GATE_LABEL not in reviews
+        assert not _decisions(
+            await _entries(postgres), DECIDING_ROLE, _role(PRD_GATE_LABEL, moved.ref)
+        )
+        moved.close()
+
         client_ = await Client.connect(
             journey_stack.temporal_address, data_converter=pydantic_data_converter
         )
@@ -387,9 +439,10 @@ async def test_a_toy_prd_and_a_toy_wave_are_signed_verified_and_merged_end_to_en
             await github_app.app_login(),
             prd,
             wave,
+            refusal,
         )
     finally:
-        for pull in (prd, refusal, wave):
+        for pull in (prd, refusal, wave, moved):
             pull.close()
 
 
@@ -419,6 +472,7 @@ async def _check_everything(
     app_login: str,
     prd: SandboxPull,
     wave: SandboxPull,
+    refusal: SandboxPull,
 ) -> None:
     pulls = {
         SkeletonStageType.PRD: (prd, PRD_GATE_LABEL),
@@ -427,7 +481,7 @@ async def _check_everything(
     entries = await _entries(postgres)
     sealed = {str(e.payload["gate_id"]): e for e in entries if e.entry_type == "sealed_call"}
     reveals = {str(e.payload["gate_id"]): e for e in entries if e.entry_type == "call_reveal"}
-    assert len(sealed) == 2 and len(reveals) == 2
+    assert {str(r.gate_id) for r in result.stages} <= set(sealed) & set(reveals)
 
     for summary in result.stages:
         pull, label = pulls[summary.stage]
@@ -438,7 +492,11 @@ async def _check_everything(
         signed_head = settled.head_sha or ""
         assert pull_state(pull.repo, mandate_token, pull.ref.number) == "merged"
         assert signed_head in commit_parents(pull.repo, mandate_token, settled.merge_commit or "")
-        assert _gate_status(pull.repo, mandate_token, signed_head) == "success"
+        # Read back from GitHub: a failure was posted on the signed head, then a success.
+        posted_states = _statuses(pull.repo, mandate_token, signed_head)
+        assert posted_states[0][0] == "success"
+        failed_before = [t for state, _, t in posted_states if state == "failure"]
+        assert failed_before and min(failed_before) <= posted_states[0][2]
         # The ledger: sealed, then the deciding role's decision on that head, then the reveal.
         gate = str(summary.gate_id)
         decision = _decisions(entries, DECIDING_ROLE, _role(label, pull.ref))
@@ -451,7 +509,13 @@ async def _check_everything(
     prd_gate = str(next(s.gate_id for s in result.stages if s.stage is SkeletonStageType.PRD))
     record = SealedCallRecord.model_validate(sealed[prd_gate].payload)
     assert record.call is not None and record.nonce is not None
-    visible = _everything_on(prd.repo, mandate_token, prd.ref.number)
+    prd_settled = next(s for s in result.stages if s.stage is SkeletonStageType.PRD).settled
+    visible = _everything_on(
+        prd.repo,
+        mandate_token,
+        prd.ref.number,
+        (prd_settled.head_sha or "", prd_settled.merge_commit or ""),
+    )
     for secret in (*record.call.reasons, *record.call.evidence_cited, record.nonce):
         assert secret not in visible
     posted = _brief_posted_at(prd.repo, mandate_token, prd.ref.number)
@@ -473,8 +537,12 @@ async def _check_everything(
     assert len(result.seed.seeded) == 4
 
     # The L0 gate refuses an App's Approve.
+    refused_at_l0 = [
+        d for state, d, _ in _statuses(refusal.repo, mandate_token, refusal.head_sha())
+        if state == "failure" and "decided by a person" in d
+    ]  # fmt: skip
+    assert refused_at_l0, "no L0 refusal on the pull request's statuses"
     assert result.l0_refusal.state is GateDecisionStateType.FAILURE
-    assert "decided by a person" in result.l0_refusal.reason
 
     # The polling steps ran, found nothing to answer, and the chain verifies.
     assert len(result.rechecks) == 3 and len(result.sweeps) == 3
