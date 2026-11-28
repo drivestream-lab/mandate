@@ -226,6 +226,7 @@ class GateDecisionCheckService(BaseBusinessService):
         all_rules = scope.rules
         snapshot, assessment = await self._signoffs.read_signoff(github, ref, rule)
         head = snapshot.head_sha
+        await self._signoffs.record_edited_approves(snapshot, rule, stamp)
         if more_than_one_gate_label(snapshot.labels, snapshot.base_ref, all_rules):
             return ambiguous_gate(head)
         candidates: list[OpenPull] = []

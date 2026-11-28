@@ -22,6 +22,8 @@ from src.engine.gates.voiding_rules import (
     attestation_evidence,
     attestation_key,
     attestation_role,
+    body_digest,
+    edited_approves,
     pinned_digest,
     revised_role,
     stale_role,
@@ -73,14 +75,36 @@ class SignoffService(BaseBusinessService):
                 MANDATE_ACTOR, role, snapshot.head_sha
             ):
                 voided |= voided_review_ids(record.evidence)
-        assessment = assess_signoff(without_reviews(snapshot, frozenset(voided)), rule)
-        if assessment.signoff is None and voided:
+        edited = {review.review_id for review in snapshot.reviews if review.edited}
+        assessment = assess_signoff(without_reviews(snapshot, frozenset(voided | edited)), rule)
+        if assessment.signoff is not None:
+            return snapshot, assessment
+        if edited_approves(snapshot, rule):
+            return snapshot, SignoffAssessment(signoff=None, reason=EDITED_FAILURE_REASON)
+        if voided:
             ids = ", ".join(str(item) for item in sorted(voided))
             return snapshot, SignoffAssessment(
                 signoff=None,
                 reason=f"{assessment.reason}; Approves {ids} on this head were voided",
             )
         return snapshot, assessment
+
+    async def record_edited_approves(
+        self, snapshot: PullRequestSnapshot, rule: GateRule, stamp: VersionStamp
+    ) -> None:
+        """Record each edited holder Approve on the head, as Mandate's own entry. Nothing is
+        recorded as the holder's signoff for them, so a fresh Approve is still found."""
+        for review in edited_approves(snapshot, rule):
+            key = attestation_key(snapshot.head_sha, review.review_id)
+            await self._write(
+                review.review_id,
+                body_digest(review.body),
+                rule,
+                attestation_edited_role(rule),
+                key,
+                "edited",
+                stamp,
+            )
 
     async def attestation_failure(
         self, signoff: SignoffReading, rule: GateRule, stamp: VersionStamp, may_record: bool
@@ -97,7 +121,15 @@ class SignoffService(BaseBusinessService):
         if await self._ledger.latest_choice(MANDATE_ACTOR, attestation_edited_role(rule), key):
             return EDITED_FAILURE_REASON
         if signoff.edited:
-            await self._write(signoff, rule, attestation_edited_role(rule), key, "edited", stamp)
+            await self._write(
+                signoff.review_id,
+                signoff.body_digest,
+                rule,
+                attestation_edited_role(rule),
+                key,
+                "edited",
+                stamp,
+            )
             return EDITED_FAILURE_REASON
         pinned = await self._ledger.latest_decision_record(
             MANDATE_ACTOR, attestation_role(rule), key
@@ -105,16 +137,33 @@ class SignoffService(BaseBusinessService):
         if pinned is None:
             if not may_record:
                 return NOT_PINNED_REASON
-            await self._write(signoff, rule, attestation_role(rule), key, "pinned", stamp)
+            await self._write(
+                signoff.review_id,
+                signoff.body_digest,
+                rule,
+                attestation_role(rule),
+                key,
+                "pinned",
+                stamp,
+            )
             return None
         if pinned_digest(pinned.evidence) == signoff.body_digest:
             return None
-        await self._write(signoff, rule, attestation_edited_role(rule), key, "edited", stamp)
+        await self._write(
+            signoff.review_id,
+            signoff.body_digest,
+            rule,
+            attestation_edited_role(rule),
+            key,
+            "edited",
+            stamp,
+        )
         return EDITED_FAILURE_REASON
 
     async def _write(
         self,
-        signoff: SignoffReading,
+        review_id: int,
+        digest: str,
         rule: GateRule,
         role: str,
         key: str,
@@ -127,8 +176,8 @@ class SignoffService(BaseBusinessService):
             rung=rule.rung,
             options_offered=(DecisionOption(option_id=choice, description=choice),),
             choice=choice,
-            reasons=(f"the body of review {signoff.review_id} as first seen",),
-            evidence=attestation_evidence(signoff.review_id, signoff.body_digest),
+            reasons=(f"the body of review {review_id} as first seen",),
+            evidence=attestation_evidence(review_id, digest),
             target_version=key,
             workflow_version=_WORKFLOW_VERSION,
             model_version=_IDENTITY_VERSION,

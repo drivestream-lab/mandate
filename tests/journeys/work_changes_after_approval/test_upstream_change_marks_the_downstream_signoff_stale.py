@@ -152,7 +152,7 @@ async def test_an_approve_body_edited_after_signoff_fails_the_check_and_the_edit
         github_app, downstream.ref, GATE_RULE, STAMP, links=links
     )
     assert edited.state is GateDecisionStateType.FAILURE
-    assert "edited after signoff" in edited.reason
+    assert "Approve was edited" in edited.reason
     assert len(await voids_recorded(services, "spec-lgtm attestation edited")) == 1
 
     # Writing the original body back does not undo it.
@@ -193,9 +193,10 @@ async def test_an_approve_edited_before_the_first_check_is_never_pinned_and_a_fr
     )
 
     assert first.state is GateDecisionStateType.FAILURE
-    assert "edited after signoff" in first.reason
+    assert "Approve was edited" in first.reason
     assert len(await voids_recorded(services, "spec-lgtm attestation edited")) == 1
     assert await voids_recorded(services, "spec-lgtm attestation") == []
+    assert await services.decisions_by(SIGNER_LOGIN) == 0
 
     # The holder approves again against the current upstream head: a fresh review, never edited.
     downstream.review(
@@ -206,3 +207,4 @@ async def test_an_approve_edited_before_the_first_check_is_never_pinned_and_a_fr
     )
     assert again.state is GateDecisionStateType.SUCCESS
     assert len(await voids_recorded(services, "spec-lgtm attestation")) == 1
+    assert await services.decisions_by(SIGNER_LOGIN) == 1

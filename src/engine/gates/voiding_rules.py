@@ -18,6 +18,7 @@ from src.models.signoff_models import (
     Attestation,
     GateRule,
     PullRequestSnapshot,
+    PullReview,
     ReviewStateType,
     UpstreamHead,
 )
@@ -134,6 +135,18 @@ def without_reviews(
     )
 
 
+def edited_approves(snapshot: PullRequestSnapshot, rule: GateRule) -> tuple[PullReview, ...]:
+    """The holders' Approves on the current head whose body was ever edited."""
+    return tuple(
+        review
+        for review in snapshot.reviews
+        if review.edited
+        and review.commit_id == snapshot.head_sha
+        and review.state is ReviewStateType.APPROVED
+        and review.reviewer in rule.holders
+    )
+
+
 def body_digest(body: str) -> str:
     return hashlib.sha256(body.encode()).hexdigest()
 
@@ -167,7 +180,7 @@ def pinned_digest(evidence: Sequence[EvidenceReference]) -> str | None:
     return None
 
 
-EDITED_FAILURE_REASON = "the attestation was edited after signoff; the holder must approve again"
+EDITED_FAILURE_REASON = "the Approve was edited; the holder must approve again"
 NOT_PINNED_REASON = "no attestation is pinned for this signoff; only the event check pins one"
 
 
