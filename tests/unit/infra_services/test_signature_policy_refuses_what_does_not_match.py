@@ -5,9 +5,10 @@ The bundle, its subject digest and the evidence tarball are recorded from a real
 Sigstore verifier is the real one, with its embedded trust root (offline), so nothing about
 the signature is faked.
 
-The bundle was signed by the signer workflow at refs/tags/evidence-1, so it stands for "a
-signer at another ref" under the trusted-branch policy; the control that it verifies when the
-policy names that ref is built with model_construct, which skips the branch-only validation.
+The bundle was signed by the signer workflow at refs/heads/main (mandate-verify 6e6baf2), so
+it verifies under the default policy and is refused under any policy that names another ref,
+workflow or repository. A signer at a tag is refused too: that policy is built with
+model_construct, which skips the branch-only validation.
 """
 
 import json
@@ -30,12 +31,10 @@ async def _token() -> str:
     return "not used"
 
 
-SIGNED_AT_TAG = EvidenceSettings.model_construct(signer_ref=RECORD["signer_ref"])
-"""Settings naming the ref the recorded bundle was really signed at."""
-
-
 def _service(settings: EvidenceSettings | None = None) -> AttestationService:
-    return AttestationService(_token, settings or SIGNED_AT_TAG, Verifier.production(offline=True))
+    return AttestationService(
+        _token, settings or EvidenceSettings(), Verifier.production(offline=True)
+    )
 
 
 async def _verify(
@@ -73,19 +72,18 @@ async def test_a_bundle_for_another_commit_or_repository_is_refused(
 @pytest.mark.parametrize(
     "settings",
     [
-        {},
-        {"signer_ref": "refs/heads/develop"},
-        {"signer_ref": "refs/heads/main", "workflow_path": ".github/workflows/other.yml"},
-        {"verify_repository": "drivestream-lab/mandate-sandbox-svc"},
+        EvidenceSettings.model_construct(signer_ref="refs/tags/evidence-1"),
+        EvidenceSettings(signer_ref="refs/heads/develop"),
+        EvidenceSettings(workflow_path=".github/workflows/other.yml"),
+        EvidenceSettings(verify_repository="drivestream-lab/mandate-sandbox-svc"),
     ],
 )
 async def test_a_bundle_signed_at_a_tag_or_another_branch_workflow_or_repository_is_refused(
-    settings: dict[str, str],
+    settings: EvidenceSettings,
 ) -> None:
-    """The default trusted ref is main: a signer at refs/tags/evidence-1 or at
-    refs/heads/develop is refused."""
+    """A signer at refs/tags/evidence-1 or at refs/heads/develop is not the trusted main."""
     with pytest.raises(EvidenceRefusal, match="Sigstore verification failed"):
-        await _verify(_service(EvidenceSettings.model_validate(settings)))
+        await _verify(_service(settings))
 
 
 @pytest.mark.req("REQ-108")
