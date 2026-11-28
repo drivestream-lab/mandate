@@ -199,7 +199,7 @@ class WalkingSkeletonRunnerService(BaseBusinessService):
             str(item.work_item_id),
             step,
             NewIssue(
-                title=f"{item.initiative}: toy PRD and toy wave",
+                title=f"{item.initiative} {item.work_item_id}: toy PRD and toy wave",
                 description=item.model_dump_json(),
             ),
         )
