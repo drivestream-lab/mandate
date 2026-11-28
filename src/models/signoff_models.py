@@ -51,6 +51,9 @@ class PullReview(BaseModel):
     commit_id: str = Field(pattern=_SHA)
     body: str
     submitted_at: datetime
+    edited: bool = Field(
+        description="True when the body was ever edited, by anyone, or the history could not be read"
+    )
 
 
 class PullRequestSnapshot(BaseModel):
@@ -142,6 +145,8 @@ class SignoffReading(BaseModel):
     signer: str
     label: str
     head_sha: str
+    review_id: int
+    body_digest: str = Field(pattern=r"^[0-9a-f]{64}$", description="SHA-256 of the Approve body")
     signed_at: datetime
     attestation: Attestation
 
@@ -192,8 +197,9 @@ class RecheckReport(BaseModel):
     escalations: tuple[EscalationNote, ...]
 
 
-MANDATE_ACTOR = "mandate"
-"""Who the ledger names for what Mandate itself records, such as a voided signoff."""
+MANDATE_ACTOR = "mandate[app]"
+"""Who the ledger names for what Mandate itself records, such as a voided signoff. No GitHub
+login can contain brackets, so no account can be mistaken for it."""
 
 
 class ArtifactLink(BaseModel):

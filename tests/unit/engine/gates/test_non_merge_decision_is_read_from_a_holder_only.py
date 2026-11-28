@@ -38,6 +38,7 @@ def _snapshot(who: str, state: ReviewStateType, commit: str = _HEAD) -> PullRequ
         commit_id=commit,
         body="",
         submitted_at=datetime(2026, 11, 27, tzinfo=UTC),
+        edited=False,
     )
     return PullRequestSnapshot(
         ref=PullRequestRef(repo="r", number=1),

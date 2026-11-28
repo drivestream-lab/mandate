@@ -226,6 +226,14 @@ class LedgerAppendService(BaseBusinessService):
             )
         return None if existing is None else _record_of(existing)
 
+    async def decision_records(
+        self, actor: str, role: str, target_version: str
+    ) -> list[DecisionRecord]:
+        """Every decision this actor recorded on this role and version, corrections included."""
+        async with self._postgres.get_session() as session:
+            found = await self._repository.find_decisions(session, actor, role, target_version)
+        return [_record_of(entry) for entry in found]
+
     async def verify(self, anchor: ChainAnchor | None = None) -> ChainVerification:
         """Read the whole chain and check it, against the anchor when one is given."""
         async with self._postgres.get_session() as session:

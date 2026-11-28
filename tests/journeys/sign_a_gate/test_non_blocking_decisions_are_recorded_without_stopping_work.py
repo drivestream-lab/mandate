@@ -67,13 +67,15 @@ async def test_review_decision_is_sealed_first_recorded_with_its_holder_and_bloc
     read = decision_from_review(snapshot, GATE_RULE.holders)
     assert read is not None and read.option_id == REQUEST_CHANGES_OPTION
     entry = await services.non_merge.record_decision(
-        brief, read, RungType.L0, datetime.now(UTC), STAMP
+        brief, read, RungType.L0, datetime.now(UTC), STAMP, opened.gate_id
     )
     assert entry is not None
     record = DecisionRecord.model_validate(entry.payload)
     assert record.actor == SIGNER_LOGIN and record.choice == REQUEST_CHANGES_OPTION
     assert (
-        await services.non_merge.record_decision(brief, read, RungType.L0, datetime.now(UTC), STAMP)
+        await services.non_merge.record_decision(
+            brief, read, RungType.L0, datetime.now(UTC), STAMP, opened.gate_id
+        )
         is None
     )
 
@@ -84,7 +86,7 @@ async def test_review_decision_is_sealed_first_recorded_with_its_holder_and_bloc
     )
     assert changed is not None and changed.option_id == APPROVE_OPTION
     correction = await services.non_merge.record_decision(
-        brief, changed, RungType.L0, datetime.now(UTC), STAMP
+        brief, changed, RungType.L0, datetime.now(UTC), STAMP, opened.gate_id
     )
     assert correction is not None and correction.entry_type == LedgerEntryType.CORRECTION
     assert (await services.entry_types())[-3:] == [
@@ -130,7 +132,7 @@ async def test_paperclip_question_is_sealed_first_answered_by_a_person_and_recor
     read = decision_from_answer(answered, "triage", holders)
     assert read is not None and read.holder == board_user.user_id
     entry = await services.non_merge.record_decision(
-        brief, read, RungType.L0, datetime.now(UTC), STAMP
+        brief, read, RungType.L0, datetime.now(UTC), STAMP, opened.gate_id
     )
     assert entry is not None
     record = DecisionRecord.model_validate(entry.payload)
