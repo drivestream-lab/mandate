@@ -7,6 +7,7 @@ from src.business_services.gates.gate_opening_service import GateOpeningService
 from src.business_services.gates.non_merge_decision_service import NonMergeDecisionService
 from src.business_services.gates.sealed_call_service import SealedCallService
 from src.business_services.gates.signoff_service import SignoffService
+from src.business_services.gates.signoff_voiding_service import SignoffVoidingService
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
 from src.database.postgres.repository.gates.gate_repository import GateRepository
 from src.database.postgres.repository.ledger.ledger_repository import LedgerRepository
@@ -36,7 +37,7 @@ class Services:
         sealed = SealedCallService(postgres, ledger, repository)
         opening = GateOpeningService(postgres, GateRepository(), sealed)
         self.signoffs = SignoffService(ledger)
-        self.check = GateDecisionCheckService(self.signoffs)
+        self.check = GateDecisionCheckService(self.signoffs, SignoffVoidingService(ledger))
         self.non_merge = NonMergeDecisionService(
             postgres, GateRepository(), sealed, opening, ledger
         )

@@ -216,6 +216,16 @@ class LedgerAppendService(BaseBusinessService):
             )
         return None if existing is None else _choice_of(existing)
 
+    async def latest_decision_record(
+        self, actor: str, role: str, target_version: str
+    ) -> DecisionRecord | None:
+        """What the holder last recorded on this role and version, or None."""
+        async with self._postgres.get_session() as session:
+            existing = await self._repository.find_latest_decision(
+                session, actor, role, target_version
+            )
+        return None if existing is None else _record_of(existing)
+
     async def verify(self, anchor: ChainAnchor | None = None) -> ChainVerification:
         """Read the whole chain and check it, against the anchor when one is given."""
         async with self._postgres.get_session() as session:
@@ -244,11 +254,16 @@ class LedgerAppendService(BaseBusinessService):
         return await self._repository.insert(session, sealed)
 
 
+def _record_of(entry: StoredLedgerEntry) -> DecisionRecord:
+    """The decision an entry records, or the decision a correction puts in its place."""
+    if entry.entry_type == LedgerEntryType.CORRECTION:
+        return CorrectionRecord.model_validate(entry.payload).corrected_decision
+    return DecisionRecord.model_validate(entry.payload)
+
+
 def _choice_of(entry: StoredLedgerEntry) -> str:
     """The choice a decision entry, or a correction of one, records."""
-    if entry.entry_type == LedgerEntryType.CORRECTION:
-        return CorrectionRecord.model_validate(entry.payload).corrected_decision.choice
-    return DecisionRecord.model_validate(entry.payload).choice
+    return _record_of(entry).choice
 
 
 def _payload(record: DecisionRecord | CorrectionRecord) -> dict[str, JsonValue]:

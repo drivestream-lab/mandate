@@ -21,7 +21,7 @@ from src.business_services.gates.sealed_call_service import (
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
 from src.database.postgres.repository.gates.gate_repository import GateRepository
 from src.engine.gates.brief import render_brief
-from src.engine.gates.non_merge_rules import ReadDecision
+from src.engine.gates.non_merge_rules import ReadDecision, decision_role
 from src.exceptions.app_exceptions import BaseAppException
 from src.infra_services.github_app_service import GitHubAppService
 from src.infra_services.paperclip_service import PaperclipService
@@ -135,11 +135,16 @@ class NonMergeDecisionService(BaseBusinessService):
         rung: RungType,
         decided_at: datetime,
         stamp: VersionStamp,
+        gate_id: UUID | None = None,
     ) -> StoredLedgerEntry | None:
-        """Write the holder's decision with their identity, once; None when already there."""
+        """Write the holder's decision with their identity, once; None when already there.
+
+        With the decision's `gate_id` it is recorded under that decision's own role, so a recorded
+        no belongs to that decision and its holder alone.
+        """
         if read.option_id not in {option.option_id for option in brief.options}:
             raise DecisionNotOfferedError(read.option_id)
-        role = f"{brief.gate_class.value} decision"
+        role = decision_role(brief.gate_class, gate_id)
         record = DecisionRecord(
             actor=read.holder,
             role=role,

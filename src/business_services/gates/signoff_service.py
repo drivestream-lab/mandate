@@ -56,7 +56,10 @@ class SignoffService(BaseBusinessService):
         return choice == SIGNOFF_CHOICE
 
     async def record_signoff(
-        self, signoff: SignoffReading, rule: GateRule, stamp: VersionStamp
+        self,
+        signoff: SignoffReading,
+        rule: GateRule,
+        stamp: VersionStamp,
     ) -> StoredLedgerEntry | None:
         """Write the signer's decision once per head; None when it was already there."""
         record = DecisionRecord(
