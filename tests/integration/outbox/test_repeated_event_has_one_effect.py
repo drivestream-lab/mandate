@@ -164,3 +164,19 @@ async def test_the_runtime_role_cannot_edit_or_remove_a_recorded_event(
             with pytest.raises(DBAPIError) as refusal:
                 await session.execute(text(statement))
         assert "permission denied" in str(refusal.value)
+
+
+@pytest.mark.parametrize("offset", [timedelta(days=-400), timedelta(days=400)])
+async def test_a_queued_message_is_due_at_the_services_own_clock(
+    postgres: PostgresService, offset: timedelta
+) -> None:
+    receiver, clock = _Receiver(), ManualClock()
+    clock.advance(offset)
+    service = OutboxDispatchService(postgres, OutboxRepository(), receiver, clock)
+    await _queue(postgres, service)
+
+    async with postgres.get_session() as session:
+        result = await session.execute(text("SELECT next_attempt_at FROM outbox.messages"))
+        assert result.scalar_one() == clock.now()
+    report = await service.dispatch_due()
+    assert (report.delivered, report.failed) == (1, 0)
