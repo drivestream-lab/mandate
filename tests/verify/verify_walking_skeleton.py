@@ -411,8 +411,10 @@ async def test_a_toy_prd_and_a_toy_wave_are_signed_verified_and_merged_end_to_en
         refused = await runner.settle_gate(moved_issue, SkeletonStageType.PRD, opened.gate_id, None)
         assert refused.state == "head_moved" and refused.head_sha == pushed, refused
         assert pull_state(META, mandate_token, moved.ref.number) == "open"
-        reviews = _everything_on(META, mandate_token, moved.ref.number, (pushed,))
-        assert "approve" not in reviews.lower() and PRD_GATE_LABEL not in reviews
+        with client(META, mandate_token) as http:
+            states = [r["state"] for r in http.get(f"/pulls/{moved.ref.number}/reviews").json()]
+            labels = [x["name"] for x in http.get(f"/issues/{moved.ref.number}").json()["labels"]]
+        assert "APPROVED" not in states and PRD_GATE_LABEL not in labels
         assert not _decisions(
             await _entries(postgres), DECIDING_ROLE, _role(PRD_GATE_LABEL, moved.ref)
         )
