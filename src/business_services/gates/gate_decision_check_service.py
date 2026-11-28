@@ -35,6 +35,7 @@ from src.engine.gates.gate_decision_rules import (
     ambiguous_gate,
     choose_rule,
     evidence_failure,
+    wave_without_evidence,
     evidence_repository_failure,
     with_evidence,
     more_than_one_gate_label,
@@ -83,6 +84,7 @@ class WaveEvidence(NamedTuple):
 
     checker: EvidenceChecker
     specs: Mapping[str, WaveEvidenceSpec]
+    owner: str
 
 
 class _Scope(NamedTuple):
@@ -306,9 +308,13 @@ class GateDecisionCheckService(BaseBusinessService):
         A refusal names its reason; any other fault propagates and fails the check on the head.
         """
         if scope.wave is None or rule.label not in scope.wave.specs:
+            if rule.wave:
+                return wave_without_evidence(head, rule), None
             return None, None
         spec = scope.wave.specs[rule.label]
-        elsewhere = evidence_repository_failure(head, spec.repository, ref.repo)
+        elsewhere = evidence_repository_failure(
+            head, spec.repository, f"{scope.wave.owner}/{ref.repo}"
+        )
         if elsewhere is not None:
             return elsewhere, None
         try:

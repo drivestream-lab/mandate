@@ -9,15 +9,21 @@ produced without a real head).
 
 import pytest
 
+from datetime import UTC, datetime
+
 from src.engine.gates.merge_rules import (
     LEFT_TO_MERGER,
+    REQUEST_CHANGES_CHOICE,
+    APPROVE_CHOICE,
     attestation_body,
+    decided_attestation,
     mandate_merges,
+    merge_decision_record,
     signoff_problem,
 )
 from src.engine.gates.signoff_rules import read_attestation
 from src.models.gate_models import PullRequestRef
-from src.models.ledger_models import RungType
+from src.models.ledger_models import DecisionRecord, RungType
 from src.models.signoff_models import Attestation, GateRule, PullRequestSnapshot
 
 _HEAD = "a" * 40
@@ -91,3 +97,34 @@ def test_an_attestation_for_anything_else_is_not_applied(
 def test_the_approve_body_is_read_back_as_the_same_attestation() -> None:
     attestation = _attestation()
     assert read_attestation(attestation_body(attestation)) == attestation
+
+
+def _decided(choice: str) -> DecisionRecord:
+    rule = GateRule(
+        label="wave-accepted",
+        branch="develop",
+        rung=RungType.L2,
+        holders=frozenset({"app[bot]"}),
+        deciding_role="deciding-role",
+    )
+    ref = PullRequestRef(repo="svc", number=7)
+    return merge_decision_record(
+        rule, ref, _attestation(), choice, datetime(2026, 11, 28, tzinfo=UTC)
+    )
+
+
+@pytest.mark.req("REQ-63")
+def test_the_app_signs_only_with_the_deciding_roles_recorded_approve() -> None:
+    none = decided_attestation(None)
+    assert isinstance(none, str) and "no decision" in none
+    assert decided_attestation(_decided(APPROVE_CHOICE)) == _attestation()
+    refused = decided_attestation(_decided(REQUEST_CHANGES_CHOICE))
+    assert isinstance(refused, str) and "request_changes" in refused
+
+
+@pytest.mark.req("REQ-63")
+def test_an_attestation_that_does_not_match_its_digest_is_not_signed() -> None:
+    record = _decided(APPROVE_CHOICE)
+    swapped = record.evidence[0].model_copy(update={"digest": "0" * 64})
+    refused = decided_attestation(record.model_copy(update={"evidence": (swapped,)}))
+    assert isinstance(refused, str) and "digest" in refused

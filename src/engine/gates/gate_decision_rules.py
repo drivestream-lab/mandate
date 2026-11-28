@@ -156,12 +156,21 @@ def evidence_failure(head_sha: str, reason: str) -> GateDecisionOutcome:
 
 
 def evidence_repository_failure(
-    head_sha: str, repository: str, repo: str
+    head_sha: str, repository: str, pull_repository: str
 ) -> GateDecisionOutcome | None:
-    """Failure when the evidence the caller named is for another repository than the pull request."""
-    if repository.rsplit("/", 1)[-1] == repo:
+    """Failure when the evidence the caller named is for another repository (owner/name) than
+    the pull request's."""
+    if repository == pull_repository:
         return None
-    return failure(head_sha, f"the evidence is configured for {repository}, not {repo}")
+    return failure(head_sha, f"the evidence is configured for {repository}, not {pull_repository}")
+
+
+def wave_without_evidence(head_sha: str, rule: GateRule) -> GateDecisionOutcome:
+    """Failure for a wave gate checked with no evidence settings: the evidence cannot be omitted."""
+    return failure(
+        head_sha,
+        f"{rule.label} is a wave gate and needs run-signed evidence, but none is configured",
+    )
 
 
 def with_evidence(

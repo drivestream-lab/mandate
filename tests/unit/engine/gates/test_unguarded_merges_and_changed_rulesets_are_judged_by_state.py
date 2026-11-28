@@ -9,13 +9,15 @@ from src.engine.gates.unguarded_merge_rules import (
     canonical_json,
     governance_findings,
     judge_merge,
-    landings,
+    revert_due,
+    unreadable_ruleset,
+    walk_complete,
+    checkpoint_reached,
     passing_check,
     protection_digest,
     ruleset_digest,
 )
 from src.models.sweep_models import (
-    BranchCommit,
     HeadStatus,
     MergeObservation,
     MergeVerdictType,
@@ -121,7 +123,8 @@ def test_the_digest_ignores_volatile_fields_and_order_but_not_content() -> None:
     }
     assert ruleset_digest(base) == ruleset_digest(same)
     assert ruleset_digest(base) != ruleset_digest({**base, "enforcement": "disabled"})
-    assert ruleset_digest(base) != ruleset_digest({**base, "bypass_actors": []})
+    # Bypass actors are not shown to Mandate's App, so they are outside the digest.
+    assert ruleset_digest(base) == ruleset_digest({**base, "bypass_actors": []})
     assert (
         canonical_json({"b": 1, "a": {"url": "u", "d": 1, "c": 2}}) == '{"a":{"c":2,"d":1},"b":1}'
     )
@@ -174,15 +177,47 @@ def test_a_changed_added_or_removed_ruleset_or_protection_is_a_finding() -> None
     assert [f.subject.split("@")[0] for f in unlisted] == ["protection release added"]
 
 
-def _commit(sha: str, *parents: str) -> BranchCommit:
-    return BranchCommit(
-        sha=sha * 40, committer="c", committed_at=_T, parents=tuple(p * 40 for p in parents)
-    )
+@pytest.mark.req("REQ-122")
+def test_a_ruleset_answer_lacking_a_field_is_unreadable_not_null() -> None:
+    whole: dict[str, JsonValue] = {
+        "rules": [],
+        "conditions": None,
+        "enforcement": "active",
+        "target": "branch",
+    }
+    assert unreadable_ruleset(whole) is None
+    without = {k: v for k, v in whole.items() if k != "conditions"}
+    assert unreadable_ruleset(without) == "conditions"
+    assert unreadable_ruleset({}) == "rules"
 
 
 @pytest.mark.req("REQ-122")
-def test_only_commits_on_the_branchs_own_line_are_landings() -> None:
-    # tip a merged a pull request whose commits d, e came in through its second parent
-    commits = [_commit("a", "b", "d"), _commit("d", "e"), _commit("e", "f"), _commit("b", "c")]
-    assert [c.sha[0] for c in landings(commits)] == ["a", "b"]
-    assert landings([]) == ()
+def test_a_landing_that_is_not_a_merged_pull_request_is_a_breach_even_for_a_named_human() -> None:
+    push = MergeObservation(
+        repo="r",
+        branch="develop",
+        merge_commit=_SHA,
+        head_sha=_SHA,
+        merged_by="kd",
+        merged_at=_T,
+        pull_number=None,
+        node_id=None,
+        statuses=(_status("success"),),
+    )
+    verdict = judge_merge(push, _APP, frozenset({"r"}), frozenset({"kd"}))
+    assert verdict is MergeVerdictType.BREACH
+
+
+@pytest.mark.req("REQ-122")
+def test_the_walk_stops_on_the_checkpoint_or_at_the_depth_and_only_the_checkpoint_counts() -> None:
+    assert walk_complete("a", "a", 0, 5) and walk_complete(None, "a", 0, 5)
+    assert walk_complete("b", "a", 5, 5) and not walk_complete("b", "a", 4, 5)
+    assert checkpoint_reached("a", "a") and checkpoint_reached("zzz", None)
+    assert not checkpoint_reached("b", "a") and not checkpoint_reached(None, "a")
+
+
+@pytest.mark.req("REQ-122")
+def test_a_breach_is_handled_only_once_its_revert_is_on_record() -> None:
+    assert revert_due(revertable=True, revert_recorded=False) is True
+    assert revert_due(revertable=True, revert_recorded=True) is False
+    assert revert_due(revertable=False, revert_recorded=False) is False

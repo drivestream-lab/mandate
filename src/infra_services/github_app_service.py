@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationEr
 
 from src.configs.github_app_settings import GitHubAppSettings
 from src.engine.gates.gate_decision_rules import PAGE_SIZE, next_page
+from src.engine.gates.unguarded_merge_rules import unreadable_ruleset
 from src.infra_services.base_infra_service import BaseInfraService
 from src.logging import get_logger
 from src.models.gate_models import PullRequestRef
@@ -39,6 +40,7 @@ logger = get_logger()
 
 _TOKEN_REUSE_SECONDS = 50 * 60
 _STATUS_DESCRIPTION_LIMIT = 140
+_MAX_PULL_PAGES = 20
 _READ_ATTEMPTS = 3
 """Reads and the check status (same state, same effect) are repeated after a dropped
 connection or a 5xx; comments and reviews never are."""
@@ -113,19 +115,9 @@ class _Person(_Record):
     login: str
 
 
-class _When(_Record):
-    date: datetime
-
-
-class _CommitDetail(_Record):
-    committer: _When
-
-
 class _CommitItem(_Record):
     sha: str
     parents: list[_Head]
-    committer: _Person | None
-    commit: _CommitDetail
 
 
 class _FullPull(_Record):
@@ -148,7 +140,11 @@ class _StatusItem(_Record):
 class _ClosedPull(_Record):
     number: int
     merged_at: datetime | None
-    updated_at: datetime
+    merge_commit_sha: str | None
+
+
+class _Branch(_Record):
+    commit: _Head
 
 
 class _Summary(_Record):
@@ -173,7 +169,6 @@ class _GraphqlAnswer(_Record):
 
 
 _REVIEWS = TypeAdapter(list[_Review])
-_COMMITS = TypeAdapter(list[_CommitItem])
 _CLOSED_PULLS = TypeAdapter(list[_ClosedPull])
 _STATUSES = TypeAdapter(list[_StatusItem])
 _SUMMARIES = TypeAdapter(list[_Summary])
@@ -336,41 +331,30 @@ class GitHubAppService(BaseInfraService):
             raise GitHubError(f"GitHub did not merge {ref.repo}#{ref.number}")
         return merged.sha
 
-    async def list_branch_commits(
-        self, repo: str, branch: str, since: datetime
-    ) -> tuple[BranchCommit, ...]:
-        """Commits on a branch made after this instant."""
-        path = f"/repos/{self._settings.owner}/{repo}/commits"
-        found: list[BranchCommit] = []
-        page: int | None = 1
-        while page is not None:
-            params: dict[str, int | str] = {
-                "sha": branch, "since": since.isoformat(), "per_page": PAGE_SIZE, "page": page,
-            }  # fmt: skip
-            try:
-                batch = _COMMITS.validate_json((await self._get(path, params)).content)
-            except ValidationError as error:
-                raise GitHubError(f"unexpected answer for {path}") from error
-            found += [
-                BranchCommit(
-                    sha=item.sha,
-                    committer=None if item.committer is None else item.committer.login,
-                    committed_at=item.commit.committer.date,
-                    parents=tuple(parent.sha for parent in item.parents),
-                )
-                for item in batch
-            ]
-            page = next_page(page, len(batch))
-        return tuple(found)
+    async def read_branch_tip(self, repo: str, branch: str) -> str:
+        """The commit a branch points at now."""
+        path = f"/repos/{self._settings.owner}/{repo}/branches/{quote(branch, safe='')}"
+        return self._parse(_Branch, await self._get(path)).commit.sha
 
-    async def merged_pulls_since(
-        self, repo: str, branch: str, since: datetime
+    async def read_commit(self, repo: str, sha: str) -> BranchCommit:
+        """A commit's parents, in order. Only its parents are read."""
+        path = f"/repos/{self._settings.owner}/{repo}/commits/{sha}"
+        item = self._parse(_CommitItem, await self._get(path))
+        return BranchCommit(sha=item.sha, parents=tuple(parent.sha for parent in item.parents))
+
+    async def merged_pulls_with_commits(
+        self, repo: str, branch: str, shas: frozenset[str]
     ) -> tuple[PullMerge, ...]:
-        """Pull requests into this branch merged after this instant, each read in full."""
+        """The pull requests into this branch that were merged as exactly these commits.
+
+        Closed pull requests are read newest first until every commit is matched or the pages
+        run out; a commit left unmatched is not a merged pull request's merge commit.
+        """
         base = f"/repos/{self._settings.owner}/{repo}"
+        wanted = set(shas)
         merged: list[PullMerge] = []
         page: int | None = 1
-        while page is not None:
+        while page is not None and wanted and page <= _MAX_PULL_PAGES:
             params: dict[str, int | str] = {
                 "state": "closed", "base": branch, "sort": "updated", "direction": "desc",
                 "per_page": PAGE_SIZE, "page": page,
@@ -382,24 +366,24 @@ class GitHubAppService(BaseInfraService):
             except ValidationError as error:
                 raise GitHubError(f"unexpected pulls answer for {repo}") from error
             for item in batch:
-                if item.merged_at is None or item.merged_at <= since:
+                if item.merged_at is None or item.merge_commit_sha not in wanted:
                     continue
                 pull = self._parse(_FullPull, await self._get(f"{base}/pulls/{item.number}"))
-                if pull.merged_at is not None:
-                    merged.append(
-                        PullMerge(
-                            number=pull.number,
-                            node_id=pull.node_id,
-                            base_ref=pull.base.ref,
-                            head_sha=pull.head.sha,
-                            merge_commit_sha=pull.merge_commit_sha,
-                            merged_at=pull.merged_at,
-                            merged_by=None if pull.merged_by is None else pull.merged_by.login,
-                        )
+                if pull.merged_at is None or pull.merge_commit_sha is None:
+                    continue
+                wanted.discard(pull.merge_commit_sha)
+                merged.append(
+                    PullMerge(
+                        number=pull.number,
+                        node_id=pull.node_id,
+                        base_ref=pull.base.ref,
+                        head_sha=pull.head.sha,
+                        merge_commit_sha=pull.merge_commit_sha,
+                        merged_at=pull.merged_at,
+                        merged_by=None if pull.merged_by is None else pull.merged_by.login,
                     )
-            oldest = min((item.updated_at for item in batch), default=None)
-            more = oldest is not None and oldest > since
-            page = next_page(page, len(batch)) if more else None
+                )
+            page = next_page(page, len(batch))
         return tuple(merged)
 
     async def list_head_statuses(self, repo: str, sha: str) -> tuple[HeadStatus, ...]:
@@ -426,18 +410,27 @@ class GitHubAppService(BaseInfraService):
         return tuple(found)
 
     async def list_rulesets(self, repo: str) -> dict[int, dict[str, JsonValue]]:
-        """Every ruleset that applies to the repository (its own and its organisation's), in full."""
+        """Every ruleset that applies to the repository (its own and its organisation's), in full,
+        all pages. An answer lacking a field the digest needs raises: it is unreadable."""
         base = f"/repos/{self._settings.owner}/{repo}/rulesets"
+        found: dict[int, dict[str, JsonValue]] = {}
+        page: int | None = 1
         try:
-            summaries = _SUMMARIES.validate_json(
-                (await self._get(base, {"per_page": PAGE_SIZE})).content
-            )
-            return {
-                item.id: _DOCUMENT.validate_json((await self._get(f"{base}/{item.id}")).content)
-                for item in summaries
-            }
+            while page is not None:
+                params: dict[str, int | str] = {"per_page": PAGE_SIZE, "page": page}
+                batch = _SUMMARIES.validate_json((await self._get(base, params)).content)
+                for item in batch:
+                    document = _DOCUMENT.validate_json(
+                        (await self._get(f"{base}/{item.id}")).content
+                    )
+                    lacking = unreadable_ruleset(document)
+                    if lacking is not None:
+                        raise GitHubError(f"ruleset {item.id} of {repo} has no {lacking}")
+                    found[item.id] = document
+                page = next_page(page, len(batch))
         except ValidationError as error:
             raise GitHubError(f"unexpected rulesets answer for {repo}") from error
+        return found
 
     async def read_branch_protection(self, repo: str, branch: str) -> JsonValue:
         """A branch's protection as GitHub reports it; None when it has none."""

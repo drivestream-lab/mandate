@@ -86,6 +86,16 @@ class GateRule(BaseModel):
     branch: str = Field(min_length=1, description="The branch whose merge this gate decides")
     rung: RungType
     holders: frozenset[str] = Field(min_length=1, description="Logins that may sign this gate")
+    wave: bool = Field(
+        default=False,
+        description="True for a wave gate: the check then also needs run-signed evidence for the head",
+    )
+    deciding_role: str | None = Field(
+        default=None,
+        pattern=_NON_BLANK,
+        description="Who the ledger names for the deciding role's decision at L2 and L3, which "
+        "Mandate's App carries out",
+    )
     revised_label: str | None = Field(
         default=None,
         pattern=_NON_BLANK,

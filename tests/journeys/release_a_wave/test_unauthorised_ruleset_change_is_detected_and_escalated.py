@@ -9,11 +9,10 @@ does, so the difference is made on the baseline side. A ruleset change cannot be
 request, so the answer is the record and the escalation.
 """
 
-from datetime import UTC, datetime
-
 import pytest
 
 from src.business_services.release.unguarded_merge_sweep_service import (
+    CHECKPOINT_ROLE,
     POLICY_BREACH_ROLE,
     UnguardedMergeSweepService,
 )
@@ -38,7 +37,6 @@ def _config(app_login: str, *baselines: RepoBaseline) -> SweepConfig:
     return SweepConfig(
         repos=(SVC,),
         mandate_login=app_login,
-        since=datetime.now(UTC),
         baselines=baselines,
     )
 
@@ -50,12 +48,15 @@ async def test_a_ruleset_or_protection_that_differs_from_the_baseline_is_recorde
     services = Services(postgres)
     sweeper = UnguardedMergeSweepService(services.ledger)
     login = await github_app.app_login()
+    for branch in ("develop", "main"):  # start from where the branches are, not from their history
+        await sweeper.record_checkpoint(github_app, SVC, branch, STAMP)
     live = await live_baseline(github_app, SVC)
     assert live.rulesets, "the sandbox repo has its gate ruleset"
 
     # What a decided run left, as it stands: nothing to record.
     clean = await sweeper.sweep(github_app, _config(login, live), STAMP)
     assert clean.findings == () and clean.escalations == ()
+    assert len(clean.limits) == 1 and "bypass actors are outside Mandate's view" in clean.limits[0]
 
     first = live.rulesets[0]
     cases = {
@@ -109,6 +110,6 @@ async def test_a_ruleset_or_protection_that_differs_from_the_baseline_is_recorde
         for e in entries
         if e.entry_type == LedgerEntryType.DECISION
     ]
-    assert roles and set(roles) == {POLICY_BREACH_ROLE}
-    assert len(roles) == len(cases) + 1
+    assert set(roles) == {POLICY_BREACH_ROLE, CHECKPOINT_ROLE}
+    assert roles.count(POLICY_BREACH_ROLE) == len(cases) + 1
     assert (await services.ledger.verify()).is_intact

@@ -8,6 +8,7 @@ signoff on a sandbox pull request and merges with the sha pinned to the verified
 """
 
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,10 +21,16 @@ from src.infra_services.github_app_service import GitHubAppService
 from src.infra_services.postgres_service import PostgresService
 from src.models.evidence_models import WaveEvidenceSpec
 from src.models.ledger_models import RungType
+from src.engine.gates.merge_rules import (
+    APPROVE_CHOICE,
+    REQUEST_CHANGES_CHOICE,
+    merge_decision_record,
+)
 from src.models.signoff_models import Attestation, GateDecisionStateType, GateRule
 from tests.journeys.journey_support import SandboxGitHub
 from tests.journeys.release_a_wave.conftest import FULL_REPO, TEST_SET, WaveBuilder
 from tests.journeys.release_a_wave.support import (
+    OWNER,
     commit_parents,
     open_pull,
     pull_state,
@@ -34,8 +41,12 @@ from tests.journeys.sign_a_gate.support import STAMP, Services
 SVC = "mandate-sandbox-svc"
 META = "mandate-sandbox-meta"
 GATE = "wave-accepted"
-_L2 = GateRule(label=GATE, branch="develop", rung=RungType.L2, holders=frozenset({SIGNER_LOGIN}))
-_L0 = GateRule(label=GATE, branch="develop", rung=RungType.L0, holders=frozenset({SIGNER_LOGIN}))
+_L2 = GateRule(
+    label=GATE, branch="develop", rung=RungType.L2, holders=frozenset({SIGNER_LOGIN}), wave=True
+)
+_L0 = GateRule(
+    label=GATE, branch="develop", rung=RungType.L0, holders=frozenset({SIGNER_LOGIN}), wave=True
+)
 
 
 def _spec(workflow: str, digest: str) -> WaveEvidenceSpec:
@@ -69,8 +80,15 @@ async def test_a_wave_passes_only_with_evidence_for_the_exact_head_and_mandate_n
     try:
         assert pull.head_sha() == wave.head
         pull.signer_signs(GATE)
-        right = WaveEvidence(evidence_service, {GATE: _spec(wave.workflow, signed_off_digest)})
-        wrong = WaveEvidence(evidence_service, {GATE: _spec(wave.workflow, "0" * 64)})
+        right = WaveEvidence(
+            evidence_service, {GATE: _spec(wave.workflow, signed_off_digest)}, OWNER
+        )
+        wrong = WaveEvidence(evidence_service, {GATE: _spec(wave.workflow, "0" * 64)}, OWNER)
+
+        # A wave gate checked with no evidence settings cannot pass: evidence cannot be omitted.
+        omitted = await services.check.evaluate_and_post(github_app, pull.ref, _L2, STAMP)
+        assert omitted.state is GateDecisionStateType.FAILURE
+        assert "wave gate" in omitted.reason, omitted.reason
 
         # Evidence for this head, as the caller fixed it at spec sign-off: the check passes.
         passed = await services.check.evaluate_and_post(
@@ -89,7 +107,7 @@ async def test_a_wave_passes_only_with_evidence_for_the_exact_head_and_mandate_n
         assert "no run-signed evidence" in refused.reason and "sign-off" in refused.reason
 
         # At L0 the merger the workflow names merges; Mandate checks and does not merge.
-        merges = MergeService(services.check)
+        merges = MergeService(services.check, services.ledger)
         at_l0 = await merges.settle(github_app, pull.ref, _L0, STAMP, wave=right)
         assert at_l0.state is MergeStateType.LEFT_TO_MERGER
         assert at_l0.check is not None and at_l0.check.state is GateDecisionStateType.FAILURE
@@ -126,7 +144,13 @@ async def test_at_l2_mandates_app_applies_the_signoff_and_merges_at_the_verified
 ) -> None:
     services = Services(postgres)
     app_login = await github_app.app_login()
-    rule = GateRule(label=GATE, branch="develop", rung=RungType.L2, holders=frozenset({app_login}))
+    rule = GateRule(
+        label=GATE,
+        branch="develop",
+        rung=RungType.L2,
+        holders=frozenset({app_login}),
+        deciding_role="journey-deciding-role",
+    )
     branch = sandbox_github.create_branch(META, "mandate-merges")
     pull = open_pull(
         META,
@@ -140,25 +164,42 @@ async def test_at_l2_mandates_app_applies_the_signoff_and_merges_at_the_verified
     )
     try:
         first = pull.head_sha()
-        stale = Attestation(
-            initiative="INIT-JOURNEY",
-            head=first,
-            gate=GATE,
-            repo=META,
-            pull_request=pull.ref.number,
-            digests=("c" * 64,),
-            artifact_paths=("journey.txt",),
-        )
-        moved = pull.author_pushes("mandate-merges-moved")
-        merges = MergeService(services.check)
+        merges = MergeService(services.check, services.ledger)
 
-        # An attestation for a head that is not the pull request's head is not applied.
-        refused = await merges.settle(github_app, pull.ref, rule, STAMP, stale)
-        assert refused.state is MergeStateType.NOT_SIGNED
+        def attestation(head: str) -> Attestation:
+            return Attestation(
+                initiative="INIT-JOURNEY",
+                head=head,
+                gate=GATE,
+                repo=META,
+                pull_request=pull.ref.number,
+                digests=("c" * 64,),
+                artifact_paths=("journey.txt",),
+            )
+
+        async def record(head: str, choice: str) -> None:
+            await services.ledger.record_decision_once(
+                merge_decision_record(rule, pull.ref, attestation(head), choice, datetime.now(UTC)),
+                STAMP,
+                "the deciding role changed its decision",
+            )
+
+        # Nothing recorded by the deciding role: Mandate's App signs nothing and merges nothing.
+        bare = await merges.settle(github_app, pull.ref, rule, STAMP)
+        assert bare.state is MergeStateType.NOT_SIGNED and "no decision" in bare.reason
+        # A recorded request for changes is not an approve.
+        await record(first, REQUEST_CHANGES_CHOICE)
+        declined = await merges.settle(github_app, pull.ref, rule, STAMP)
+        assert declined.state is MergeStateType.NOT_SIGNED and "request_changes" in declined.reason
+        # The head moves: the decision was for the old head, so there is none for this one.
+        moved = pull.author_pushes("mandate-merges-moved")
+        stale = await merges.settle(github_app, pull.ref, rule, STAMP)
+        assert stale.state is MergeStateType.NOT_SIGNED
         assert pull_state(META, mandate_token, pull.ref.number) == "open"
 
-        current = stale.model_copy(update={"head": moved})
-        outcome = await merges.settle(github_app, pull.ref, rule, STAMP, current)
+        # The deciding role approves this head: Mandate's App signs with that attestation and merges.
+        await record(moved, APPROVE_CHOICE)
+        outcome = await merges.settle(github_app, pull.ref, rule, STAMP)
         assert outcome.state is MergeStateType.MERGED, outcome.reason
         assert outcome.check is not None and outcome.check.head_sha == moved
         assert pull_state(META, mandate_token, pull.ref.number) == "merged"

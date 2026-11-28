@@ -1,29 +1,30 @@
-"""One sweep over the governed repositories: merges that had no passing check, and gate rulesets
-or branch protection that are not what a decided Launchpad run left.
+"""One sweep over the governed repositories: landings that were not a merge guarded by a passing
+check, and gate rulesets or branch protection that are not what a decided Launchpad run left.
 
-Merges. Every commit that landed on develop or main since the sweep's start is looked at (the
-branch's own first-parent line: merge commits, squashed commits and commits pushed straight to it;
-a commit a pull request brought in is reached through its merge). One that came in through a merged
-pull request is judged on the head that was merged: the newest mandate/gate-decision
-at or before the merge must be a success posted by Mandate's App. One pushed without a pull request
-is judged on itself. A merge that fails is a policy breach: it is recorded in the ledger, escalated
-to the owner, and answered with a revert pull request, which goes through the gate like any other.
-On Mandate's own repositories a merge by a named emergency human is recorded as the emergency
-exception with its evidence (who, which commit, when) and escalated, and is not reverted. On any
-other repository there is no exception. A direct push has no pull request to revert, so it is
-recorded and escalated without one.
+Landings. Each of develop and main is walked from its current tip back through first parents
+to the tip the previous sweep recorded in the ledger (the checkpoint, written by Mandate); the
+first sweep has none and goes back as far as `max_depth` landings. Commit dates are never used.
+A landing that is a merged pull request's merge commit is judged on the head that was merged: the
+newest mandate/gate-decision at or before GitHub's merge time must be a success posted by
+Mandate's App. A landing that is not (a push, or a rebase merge) is a breach whatever statuses it
+has. A branch whose line no longer leads to the checkpoint was rewritten: a breach too. A breach
+is recorded in the ledger, escalated to the owner, and answered with a revert pull request, which
+goes through the gate like any other; it is handled only once that revert pull request is on
+record, so a revert that failed to open is opened by the next sweep. On Mandate's own repositories
+a merged pull request merged by a named emergency human is recorded as the emergency exception with
+its evidence (who, which commit, when), escalated, and not reverted; a push is never an exception.
+The checkpoint moves to the tip only when every landing was answered.
 
-Rulesets. The state is judged, not the actor: each ruleset and each governed branch's protection
-is reduced to a digest and compared with the baseline the caller supplies. Anything that differs,
-appeared or disappeared is a breach, and so is a missing or empty baseline. A ruleset change cannot
-be reverted by a pull request, so the answer is the record and the escalation.
+Rulesets. The state is judged, not the actor: each ruleset (all pages) and each governed branch's
+protection is reduced to a digest and compared with the baseline the caller supplies. A
+difference, an added or removed ruleset, an unreadable answer and a missing or empty baseline are
+findings. A ruleset change cannot be reverted by a pull request, so the answer is the record and
+the escalation. Bypass actors are not shown to Mandate's App, so they are outside the digest and
+the report states that limit.
 
-Only merge commits and squash merges can be matched to their pull request; a rebase merge lands
-each commit on its own and is judged as pushes.
-
-A finding already in the ledger from an earlier sweep is not recorded, escalated or reverted again.
-A repository or branch that cannot be read is escalated, never skipped silently. Escalation today is
-an error log and a returned note; no channel to the owner exists yet.
+A finding already in the ledger is not recorded or escalated again. A repository or branch that
+cannot be read is escalated, never skipped silently. Escalation today is an error log and a
+returned note; no channel to the owner exists yet.
 """
 
 from collections.abc import Mapping
@@ -37,13 +38,16 @@ from pydantic import JsonValue
 from src.business_services.base_business_service import BaseBusinessService
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
 from src.engine.gates.unguarded_merge_rules import (
+    BYPASS_LIMIT,
     breach_reason,
+    checkpoint_reached,
     emergency_reason,
     governance_findings,
     judge_merge,
-    landings,
     protection_digest,
+    revert_due,
     ruleset_digest,
+    walk_complete,
 )
 from src.models.kernel_models import VersionStamp
 from src.models.ledger_models import DecisionOption, DecisionRecord, EvidenceReference, RungType
@@ -66,6 +70,8 @@ from src.models.sweep_models import (
 
 POLICY_BREACH_ROLE = "policy-breach"
 EMERGENCY_EXCEPTION_ROLE = "emergency-exception"
+CHECKPOINT_ROLE = "sweep-checkpoint"
+REVERT_ROLE = "revert-opened"
 _WORKFLOW_VERSION = "unguarded-merge-sweep/1"
 _RULES_VERSION = "mandate-rules"
 _EVIDENCE_KIND = "sweep-finding"
@@ -74,12 +80,12 @@ _EVIDENCE_KIND = "sweep-finding"
 class SweepGitHub(Protocol):
     """What a sweep reads from GitHub, and the one thing it writes."""
 
-    async def list_branch_commits(
-        self, repo: str, branch: str, since: datetime
-    ) -> tuple[BranchCommit, ...]: ...
+    async def read_branch_tip(self, repo: str, branch: str) -> str: ...
 
-    async def merged_pulls_since(
-        self, repo: str, branch: str, since: datetime
+    async def read_commit(self, repo: str, sha: str) -> BranchCommit: ...
+
+    async def merged_pulls_with_commits(
+        self, repo: str, branch: str, shas: frozenset[str]
     ) -> tuple[PullMerge, ...]: ...
 
     async def list_head_statuses(self, repo: str, sha: str) -> tuple[HeadStatus, ...]: ...
@@ -92,16 +98,17 @@ class SweepGitHub(Protocol):
 
 
 class _Found:
-    """What one repository's sweep gathered."""
+    """What one sweep gathered."""
 
     def __init__(self) -> None:
         self.findings: list[RecordedFinding] = []
         self.escalations: list[SweepEscalation] = []
         self.reverts: list[OpenedRevert] = []
+        self.limits: list[str] = []
 
 
 class UnguardedMergeSweepService(BaseBusinessService):
-    """Finds unguarded merges and unauthorised gate changes, records them and answers them."""
+    """Finds unguarded landings and unauthorised gate changes, records them and answers them."""
 
     @inject
     def __init__(self, ledger: LedgerAppendService) -> None:
@@ -115,73 +122,134 @@ class UnguardedMergeSweepService(BaseBusinessService):
         found = _Found()
         baselines = {item.repo: item for item in config.baselines}
         for repo in config.repos:
-            await self._sweep_merges(github, config, repo, stamp, found)
+            for branch in sorted(GOVERNED_BRANCHES):
+                await self._sweep_branch(github, config, repo, branch, stamp, found)
             await self._sweep_governance(github, repo, baselines.get(repo), stamp, found)
         return SweepReport(
             findings=tuple(found.findings),
             escalations=tuple(found.escalations),
             reverts=tuple(found.reverts),
+            limits=tuple(found.limits),
         )
 
-    async def _sweep_merges(
+    async def record_checkpoint(
+        self,
+        github: SweepGitHub,
+        repo: str,
+        branch: str,
+        stamp: VersionStamp,
+        tip: str | None = None,
+    ) -> str:
+        """Start sweeping from this commit, or the branch's tip as it is now (what a previous
+        sweep would have left). Returns the commit recorded."""
+        tip = tip or await github.read_branch_tip(repo, branch)
+        await self._write_checkpoint(repo, branch, tip, stamp)
+        return tip
+
+    async def _sweep_branch(
         self,
         github: SweepGitHub,
         config: SweepConfig,
         repo: str,
+        branch: str,
         stamp: VersionStamp,
         found: _Found,
     ) -> None:
-        for branch in sorted(GOVERNED_BRANCHES):
+        subject = f"{branch} landings"
+        try:
+            tip = await github.read_branch_tip(repo, branch)
+            checkpoint = await self._ledger.latest_choice(
+                MANDATE_ACTOR, CHECKPOINT_ROLE, _checkpoint_target(repo, branch)
+            )
+            line, stopped = await self._first_parent_line(
+                github, repo, tip, checkpoint, config.max_depth
+            )
+        except Exception as error:  # a branch that cannot be read is for the owner to see
+            self._escalate(found, repo, subject, f"could not be read ({type(error).__name__})")
+            return
+        landed = [commit.sha for commit in line]
+        complete = True
+        if not checkpoint_reached(stopped, checkpoint):
+            reason = (
+                f"{branch} no longer leads to the checkpoint {checkpoint}: it was rewritten, or "
+                f"more than {config.max_depth} landings came in since the last sweep"
+            )
+            complete = await self._record_unrevertable(
+                found,
+                repo,
+                f"{branch} rewritten@{tip[:12]}",
+                BreachKindType.REWRITTEN_BRANCH,
+                reason,
+                stamp,
+            )
+        try:
+            pulls = {
+                pull.merge_commit_sha: pull
+                for pull in await github.merged_pulls_with_commits(repo, branch, frozenset(landed))
+                if pull.merge_commit_sha is not None
+            }
+        except Exception as error:
+            self._escalate(
+                found, repo, subject, f"pull requests could not be read ({type(error).__name__})"
+            )
+            return
+        for sha in landed:
             try:
-                observations = await self._observe(github, repo, branch, config.since)
-            except Exception as error:  # a branch that cannot be read is for the owner to see
-                self._escalate(
-                    found, repo, f"{branch} merges", f"could not be read ({type(error).__name__})"
-                )
-                continue
-            for observation in observations:
+                observation = await self._observe(github, repo, branch, sha, pulls.get(sha))
                 verdict = judge_merge(
                     observation, config.mandate_login, config.own_repos, config.emergency_humans
                 )
-                if verdict is MergeVerdictType.GUARDED:
-                    continue
-                try:
-                    await self._answer(github, observation, verdict, stamp, found)
-                except Exception as error:
-                    self._escalate(
-                        found,
-                        repo,
-                        observation.merge_commit,
-                        f"the merge could not be recorded or answered ({type(error).__name__})",
+                if verdict is not MergeVerdictType.GUARDED:
+                    complete = (
+                        await self._answer(github, observation, verdict, stamp, found) and complete
                     )
+            except Exception as error:
+                complete = False
+                self._escalate(
+                    found,
+                    repo,
+                    sha,
+                    f"the landing could not be recorded or answered ({type(error).__name__})",
+                )
+        if complete:
+            try:
+                await self._write_checkpoint(repo, branch, tip, stamp)
+            except Exception as error:
+                self._escalate(
+                    found,
+                    repo,
+                    subject,
+                    f"the checkpoint could not be written ({type(error).__name__})",
+                )
+
+    async def _first_parent_line(
+        self, github: SweepGitHub, repo: str, tip: str, checkpoint: str | None, max_depth: int
+    ) -> tuple[list[BranchCommit], str | None]:
+        """The landings from the tip back to, not including, the checkpoint (or the depth), and
+        the commit the walk stopped on."""
+        line: list[BranchCommit] = []
+        current: str | None = tip
+        while current is not None and not walk_complete(current, checkpoint, len(line), max_depth):
+            commit = await github.read_commit(repo, current)
+            line.append(commit)
+            current = commit.parents[0] if commit.parents else None
+        return line, current
 
     async def _observe(
-        self, github: SweepGitHub, repo: str, branch: str, since: datetime
-    ) -> list[MergeObservation]:
-        observations: list[MergeObservation] = []
-        commits = await github.list_branch_commits(repo, branch, since)
-        merged = {
-            pull.merge_commit_sha: pull
-            for pull in await github.merged_pulls_since(repo, branch, since)
-            if pull.merge_commit_sha is not None
-        }
-        for commit in landings(commits):
-            pull = merged.get(commit.sha)
-            head = pull.head_sha if pull else commit.sha
-            observations.append(
-                MergeObservation(
-                    repo=repo,
-                    branch=branch,
-                    merge_commit=commit.sha,
-                    head_sha=head,
-                    merged_by=pull.merged_by if pull else commit.committer,
-                    merged_at=pull.merged_at if pull else _utc(commit.committed_at),
-                    pull_number=pull.number if pull else None,
-                    node_id=pull.node_id if pull else None,
-                    statuses=await github.list_head_statuses(repo, head),
-                )
-            )
-        return observations
+        self, github: SweepGitHub, repo: str, branch: str, sha: str, pull: PullMerge | None
+    ) -> MergeObservation:
+        head = pull.head_sha if pull else sha
+        return MergeObservation(
+            repo=repo,
+            branch=branch,
+            merge_commit=sha,
+            head_sha=head,
+            merged_by=pull.merged_by if pull else None,
+            merged_at=pull.merged_at if pull else datetime.now(UTC),
+            pull_number=pull.number if pull else None,
+            node_id=pull.node_id if pull else None,
+            statuses=await github.list_head_statuses(repo, head),
+        )
 
     async def _answer(
         self,
@@ -190,7 +258,8 @@ class UnguardedMergeSweepService(BaseBusinessService):
         verdict: MergeVerdictType,
         stamp: VersionStamp,
         found: _Found,
-    ) -> None:
+    ) -> bool:
+        """Record, escalate and answer one landing; True only when it is fully handled."""
         emergency = verdict is MergeVerdictType.EMERGENCY_EXCEPTION
         reason = emergency_reason(observation) if emergency else breach_reason(observation)
         kind = BreachKindType.EMERGENCY_MERGE if emergency else BreachKindType.UNGUARDED_MERGE
@@ -202,30 +271,75 @@ class UnguardedMergeSweepService(BaseBusinessService):
             observation.merged_by or MANDATE_ACTOR,
             stamp,
         )
-        if not recorded:
-            return
-        found.findings.append(
-            RecordedFinding(
-                kind=kind, repo=observation.repo, subject=observation.merge_commit, detail=reason
+        if recorded:
+            found.findings.append(
+                RecordedFinding(
+                    kind=kind,
+                    repo=observation.repo,
+                    subject=observation.merge_commit,
+                    detail=reason,
+                )
             )
-        )
-        self._escalate(found, observation.repo, observation.merge_commit, reason)
+            self._escalate(found, observation.repo, observation.merge_commit, reason)
         if emergency:
-            return
+            return True
         if observation.node_id is None or observation.pull_number is None:
-            self._escalate(
-                found,
-                observation.repo,
-                observation.merge_commit,
-                "no revert pull request: the commit was pushed without a pull request",
-            )
-            return
+            if recorded:
+                self._escalate(
+                    found,
+                    observation.repo,
+                    observation.merge_commit,
+                    "no revert pull request: the commit is not a merged pull request",
+                )
+            return True
+        opened = await self._ledger.latest_choice(
+            MANDATE_ACTOR, REVERT_ROLE, observation.merge_commit
+        )
+        if not revert_due(True, opened is not None):
+            return True
         revert = await github.open_revert_pull(observation.node_id)
+        await self._remember_revert(observation, revert, stamp)
         found.reverts.append(
             OpenedRevert(
                 repo=observation.repo, reverted_pull=observation.pull_number, revert_pull=revert
             )
         )
+        return True
+
+    async def _remember_revert(
+        self, observation: MergeObservation, revert: int, stamp: VersionStamp
+    ) -> None:
+        text = f"{observation.repo}: revert pull request {revert} opened for {observation.merge_commit}"
+        await self._write(REVERT_ROLE, observation.merge_commit, f"pull {revert}", text, stamp)
+
+    async def _record_unrevertable(
+        self,
+        found: _Found,
+        repo: str,
+        target: str,
+        kind: BreachKindType,
+        reason: str,
+        stamp: VersionStamp,
+    ) -> bool:
+        """Record and escalate a breach no pull request can revert."""
+        try:
+            recorded = await self._record(
+                POLICY_BREACH_ROLE,
+                kind,
+                f"{repo}: {target}",
+                f"{repo}: {reason}",
+                MANDATE_ACTOR,
+                stamp,
+            )
+        except Exception as error:
+            self._escalate(found, repo, target, f"could not be recorded ({type(error).__name__})")
+            return False
+        if recorded:
+            found.findings.append(
+                RecordedFinding(kind=kind, repo=repo, subject=target, detail=reason)
+            )
+            self._escalate(found, repo, target, reason)
+        return True
 
     async def _sweep_governance(
         self,
@@ -244,6 +358,8 @@ class UnguardedMergeSweepService(BaseBusinessService):
         except Exception as error:  # what cannot be read cannot be shown to be unchanged
             self._escalate(found, repo, "rulesets", f"could not be read ({type(error).__name__})")
             return
+        if BYPASS_LIMIT not in found.limits:
+            found.limits.append(BYPASS_LIMIT)
         findings = governance_findings(
             repo,
             {ruleset_id: ruleset_digest(doc) for ruleset_id, doc in rulesets.items()},
@@ -256,34 +372,14 @@ class UnguardedMergeSweepService(BaseBusinessService):
     async def _record_governance(
         self, finding: GovernanceFinding, stamp: VersionStamp, found: _Found
     ) -> None:
-        subject = f"{finding.repo}: {finding.subject}"
-        try:
-            recorded = await self._record(
-                POLICY_BREACH_ROLE,
-                BreachKindType.GOVERNANCE_CHANGE,
-                subject,
-                f"{finding.repo}: {finding.reason}",
-                MANDATE_ACTOR,
-                stamp,
-            )
-        except Exception as error:
-            self._escalate(
-                found,
-                finding.repo,
-                finding.subject,
-                f"could not be recorded ({type(error).__name__})",
-            )
-            return
-        if recorded:
-            found.findings.append(
-                RecordedFinding(
-                    kind=BreachKindType.GOVERNANCE_CHANGE,
-                    repo=finding.repo,
-                    subject=finding.subject,
-                    detail=finding.reason,
-                )
-            )
-            self._escalate(found, finding.repo, finding.subject, finding.reason)
+        await self._record_unrevertable(
+            found,
+            finding.repo,
+            finding.subject,
+            BreachKindType.GOVERNANCE_CHANGE,
+            finding.reason,
+            stamp,
+        )
 
     async def _record(
         self,
@@ -295,13 +391,24 @@ class UnguardedMergeSweepService(BaseBusinessService):
         stamp: VersionStamp,
     ) -> bool:
         """Write the finding once per role and target; False when an earlier sweep wrote it."""
+        return await self._write(role, target, kind.value, reason, stamp, f"acted by {seen_by}")
+
+    async def _write(
+        self,
+        role: str,
+        target: str,
+        choice: str,
+        reason: str,
+        stamp: VersionStamp,
+        extra: str | None = None,
+    ) -> bool:
         record = DecisionRecord(
             actor=MANDATE_ACTOR,
             role=role,
             rung=RungType.L0,
-            options_offered=(DecisionOption(option_id=kind.value, description=reason),),
-            choice=kind.value,
-            reasons=(reason, f"acted by {seen_by}"),
+            options_offered=(DecisionOption(option_id=choice, description=reason),),
+            choice=choice,
+            reasons=(reason,) if extra is None else (reason, extra),
             evidence=(
                 EvidenceReference(
                     kind=_EVIDENCE_KIND,
@@ -319,10 +426,21 @@ class UnguardedMergeSweepService(BaseBusinessService):
             is not None
         )
 
+    async def _write_checkpoint(
+        self, repo: str, branch: str, tip: str, stamp: VersionStamp
+    ) -> None:
+        await self._write(
+            CHECKPOINT_ROLE,
+            _checkpoint_target(repo, branch),
+            tip,
+            f"{repo} {branch} was at {tip} when last swept",
+            stamp,
+        )
+
     def _escalate(self, found: _Found, repo: str, subject: str, reason: str) -> None:
         self.logger.error("policy escalation", repo=repo, subject=subject, reason=reason)
         found.escalations.append(SweepEscalation(repo=repo, subject=subject, reason=reason))
 
 
-def _utc(moment: datetime) -> datetime:
-    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+def _checkpoint_target(repo: str, branch: str) -> str:
+    return f"{repo}/{branch}"

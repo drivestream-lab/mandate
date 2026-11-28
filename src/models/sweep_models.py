@@ -12,16 +12,13 @@ _DIGEST = r"^[0-9a-f]{64}$"
 
 
 class BranchCommit(BaseModel):
-    """A commit on a governed branch, as listed."""
+    """A commit on a governed branch and its parents (the first is the line merged into). Its date
+    and committer are never read: both are set by whoever pushed it."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     sha: str = Field(pattern=_SHA)
-    committer: str | None
-    committed_at: datetime
-    parents: tuple[str, ...] = Field(
-        description="Parent commits, the first being the line merged into"
-    )
+    parents: tuple[str, ...]
 
 
 class PullMerge(BaseModel):
@@ -59,7 +56,9 @@ class MergeObservation(BaseModel):
     head_sha: str = Field(pattern=_SHA, description="The head that was merged")
     merged_by: str | None
     merged_at: datetime
-    pull_number: int | None = Field(description="None for a commit pushed without a pull request")
+    pull_number: int | None = Field(
+        description="None for a commit that is not a merged pull request's merge commit"
+    )
     node_id: str | None = Field(description="The merged pull request's node id, for a revert")
     statuses: tuple[HeadStatus, ...]
 
@@ -126,13 +125,19 @@ class SweepConfig(BaseModel):
         default=frozenset(), description="Logins of the named emergency humans"
     )
     mandate_login: str = Field(min_length=1, description="The login that posts the required check")
-    since: datetime = Field(description="Merges after this instant are swept")
+    max_depth: int = Field(
+        default=50,
+        gt=0,
+        description="How many landings back a branch is walked: the first sweep goes this far, "
+        "and a later one fails if its checkpoint is not reached within it",
+    )
     baselines: tuple[RepoBaseline, ...] = ()
 
 
 class BreachKindType(StrEnum):
     """The kinds of finding a sweep records."""
 
+    REWRITTEN_BRANCH = "rewritten-branch"
     UNGUARDED_MERGE = "unguarded-merge"
     EMERGENCY_MERGE = "emergency-merge"
     GOVERNANCE_CHANGE = "governance-change"
@@ -178,3 +183,6 @@ class SweepReport(BaseModel):
     findings: tuple[RecordedFinding, ...]
     escalations: tuple[SweepEscalation, ...]
     reverts: tuple[OpenedRevert, ...]
+    limits: tuple[str, ...] = Field(
+        default=(), description="What this sweep cannot see, stated once per sweep"
+    )

@@ -23,10 +23,13 @@ from src.business_services.gates.gate_decision_check_service import (
     GitHubGateClient,
     WaveEvidence,
 )
+from src.business_services.ledger.ledger_append_service import LedgerAppendService
 from src.engine.gates.merge_rules import (
     LEFT_TO_MERGER,
     attestation_body,
+    decided_attestation,
     mandate_merges,
+    merge_decision_role,
     signoff_problem,
 )
 from src.infra_services.github_app_service import GitHubError
@@ -34,7 +37,6 @@ from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
 from src.models.signoff_models import (
     ArtifactLink,
-    Attestation,
     DecisionLink,
     GateDecisionOutcome,
     GateDecisionStateType,
@@ -77,9 +79,10 @@ class MergeService(BaseBusinessService):
     """Settles a gate's merge by rung."""
 
     @inject
-    def __init__(self, checks: GateDecisionCheckService) -> None:
+    def __init__(self, checks: GateDecisionCheckService, ledger: LedgerAppendService) -> None:
         super().__init__()
         self._checks = checks
+        self._ledger = ledger
 
     async def settle(
         self,
@@ -87,7 +90,6 @@ class MergeService(BaseBusinessService):
         ref: PullRequestRef,
         rule: GateRule,
         stamp: VersionStamp,
-        attestation: Attestation | None = None,
         all_rules: Sequence[GateRule] = (),
         links: Sequence[ArtifactLink] = (),
         decision_links: Sequence[DecisionLink] = (),
@@ -95,8 +97,9 @@ class MergeService(BaseBusinessService):
     ) -> MergeOutcome:
         """Run the check and, at L2 and L3 only, sign as Mandate's App and merge.
 
-        `attestation` is what the deciding role's decision attested to for this head; at L2 and
-        L3 it is required, and it must name this head, gate, repository and pull request.
+        At L2 and L3 the deciding role's recorded approve for this repository, pull request, head
+        and gate is read from the ledger and its attestation is what Mandate's App signs with;
+        without that record, or with any other choice, nothing is applied.
         """
         if not mandate_merges(rule.rung):
             checked = await self._check(
@@ -105,12 +108,17 @@ class MergeService(BaseBusinessService):
             return MergeOutcome(
                 state=MergeStateType.LEFT_TO_MERGER, reason=LEFT_TO_MERGER, check=checked
             )
-        if attestation is None:
+        if rule.deciding_role is None:
             return MergeOutcome(
-                state=MergeStateType.NOT_SIGNED,
-                reason="no attestation was given, so there is nothing to apply",
+                state=MergeStateType.NOT_SIGNED, reason="the gate names no deciding role"
             )
         snapshot = await github.read_pull_request(ref)
+        record = await self._ledger.latest_decision_record(
+            rule.deciding_role, merge_decision_role(rule, ref), snapshot.head_sha
+        )
+        attestation = decided_attestation(record)
+        if isinstance(attestation, str):
+            return MergeOutcome(state=MergeStateType.NOT_SIGNED, reason=attestation)
         problem = signoff_problem(snapshot, rule, attestation)
         if problem is not None:
             return MergeOutcome(state=MergeStateType.NOT_SIGNED, reason=problem)
