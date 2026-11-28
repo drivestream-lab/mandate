@@ -21,8 +21,10 @@ from src.models.gate_models import PullRequestRef
 from src.models.signoff_models import (
     GATE_DECISION_CONTEXT,
     GateDecisionStateType,
+    OpenPull,
     PullRequestSnapshot,
     PullReview,
+    ReviewerKindType,
     ReviewStateType,
 )
 
@@ -56,17 +58,24 @@ class _Label(_Record):
     name: str
 
 
+class _Base(_Record):
+    ref: str
+
+
 class _Pull(_Record):
     head: _Head
+    base: _Base
     draft: bool
     labels: list[_Label]
 
 
 class _User(_Record):
     login: str
+    type: ReviewerKindType
 
 
 class _Review(_Record):
+    id: int
     user: _User | None
     state: ReviewStateType
     commit_id: str | None
@@ -74,7 +83,14 @@ class _Review(_Record):
     submitted_at: datetime | None
 
 
+class _CommitPull(_Record):
+    number: int
+    state: str
+    base: _Base
+
+
 _REVIEWS = TypeAdapter(list[_Review])
+_COMMIT_PULLS = TypeAdapter(list[_CommitPull])
 
 
 class GitHubAppService(BaseInfraService):
@@ -125,10 +141,29 @@ class GitHubAppService(BaseInfraService):
             page += 1
         return PullRequestSnapshot(
             ref=ref,
+            base_ref=pull.base.ref,
             head_sha=pull.head.sha,
             labels=tuple(label.name for label in pull.labels),
             is_draft=pull.draft,
             reviews=tuple(_to_review(item) for item in reviews),
+        )
+
+    async def read_head_sha(self, ref: PullRequestRef) -> str:
+        """Only the pull request's head commit (when the rest of it cannot be read)."""
+        path = f"/repos/{self._settings.owner}/{ref.repo}/pulls/{ref.number}"
+        return self._parse(_Pull, await self._get(path)).head.sha
+
+    async def open_pulls_for_commit(self, repo: str, head_sha: str) -> tuple[OpenPull, ...]:
+        """The open pull requests whose head is this commit."""
+        path = f"/repos/{self._settings.owner}/{repo}/commits/{head_sha}/pulls"
+        try:
+            found = _COMMIT_PULLS.validate_json((await self._get(path)).content)
+        except ValidationError as error:
+            raise GitHubError(f"unexpected answer for {path}") from error
+        return tuple(
+            OpenPull(ref=PullRequestRef(repo=repo, number=item.number), base_ref=item.base.ref)
+            for item in found
+            if item.state == "open"
         )
 
     async def post_gate_decision(
@@ -179,16 +214,22 @@ class GitHubAppService(BaseInfraService):
         return self._token
 
     async def _get(self, path: str, params: dict[str, int] | None = None) -> httpx.Response:
-        response = await self._ready().get(
-            path, params=params, headers=_headers(await self._token_for_calls())
-        )
+        try:
+            response = await self._ready().get(
+                path, params=params, headers=_headers(await self._token_for_calls())
+            )
+        except httpx.HTTPError as error:
+            raise GitHubError(f"GitHub could not be reached for {path}") from error
         self._raise_for_status(response, path)
         return response
 
     async def _post(self, path: str, body: dict[str, str]) -> None:
-        response = await self._ready().post(
-            path, json=body, headers=_headers(await self._token_for_calls())
-        )
+        try:
+            response = await self._ready().post(
+                path, json=body, headers=_headers(await self._token_for_calls())
+            )
+        except httpx.HTTPError as error:
+            raise GitHubError(f"GitHub could not be reached for {path}") from error
         self._raise_for_status(response, path)
 
     def _ready(self) -> httpx.AsyncClient:
@@ -213,7 +254,9 @@ def _to_review(item: _Review) -> PullReview:
     if item.user is None or item.commit_id is None or item.submitted_at is None:
         raise GitHubError("a review is missing its reviewer, commit or time")
     return PullReview(
+        review_id=item.id,
         reviewer=item.user.login,
+        reviewer_kind=item.user.type,
         state=item.state,
         commit_id=item.commit_id,
         body=item.body or "",

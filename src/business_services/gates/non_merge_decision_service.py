@@ -20,7 +20,6 @@ from src.business_services.gates.sealed_call_service import (
 )
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
 from src.database.postgres.repository.gates.gate_repository import GateRepository
-from src.database.postgres.repository.ledger.ledger_repository import LedgerRepository
 from src.engine.gates.brief import render_brief
 from src.engine.gates.non_merge_rules import ReadDecision
 from src.exceptions.app_exceptions import BaseAppException
@@ -73,7 +72,6 @@ class NonMergeDecisionService(BaseBusinessService):
         sealed_calls: SealedCallService,
         opening: GateOpeningService,
         ledger: LedgerAppendService,
-        ledger_repository: LedgerRepository,
     ) -> None:
         super().__init__()
         self._postgres = postgres_service
@@ -81,7 +79,6 @@ class NonMergeDecisionService(BaseBusinessService):
         self._sealed_calls = sealed_calls
         self._opening = opening
         self._ledger = ledger
-        self._ledger_repository = ledger_repository
 
     async def ask_on_pull_request(
         self,
@@ -143,12 +140,6 @@ class NonMergeDecisionService(BaseBusinessService):
         if read.option_id not in {option.option_id for option in brief.options}:
             raise DecisionNotOfferedError(read.option_id)
         role = f"{brief.gate_class.value} decision"
-        async with self._postgres.get_session() as session:
-            existing = await self._ledger_repository.find_decision(
-                session, read.holder, role, brief.head_sha
-            )
-        if existing is not None:
-            return None
         record = DecisionRecord(
             actor=read.holder,
             role=role,
@@ -165,4 +156,6 @@ class NonMergeDecisionService(BaseBusinessService):
             model_version=_IDENTITY_VERSION,
             decided_at=read.decided_at or decided_at,
         )
-        return await self._ledger.append_decision(record, stamp)
+        return await self._ledger.record_decision_once(
+            record, stamp, f"{read.holder} changed their decision to {read.option_id}"
+        )

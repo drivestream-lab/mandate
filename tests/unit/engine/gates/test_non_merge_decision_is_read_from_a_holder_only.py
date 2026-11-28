@@ -18,7 +18,12 @@ from src.models.paperclip_models import (
     QuestionAnswer,
     QuestionResult,
 )
-from src.models.signoff_models import PullRequestSnapshot, PullReview, ReviewStateType
+from src.models.signoff_models import (
+    PullRequestSnapshot,
+    PullReview,
+    ReviewerKindType,
+    ReviewStateType,
+)
 
 _HEAD = "a" * 40
 _HOLDERS = frozenset({"holder[bot]"})
@@ -26,7 +31,9 @@ _HOLDERS = frozenset({"holder[bot]"})
 
 def _snapshot(who: str, state: ReviewStateType, commit: str = _HEAD) -> PullRequestSnapshot:
     review = PullReview(
+        review_id=1,
         reviewer=who,
+        reviewer_kind=ReviewerKindType.BOT,
         state=state,
         commit_id=commit,
         body="",
@@ -34,6 +41,7 @@ def _snapshot(who: str, state: ReviewStateType, commit: str = _HEAD) -> PullRequ
     )
     return PullRequestSnapshot(
         ref=PullRequestRef(repo="r", number=1),
+        base_ref="develop",
         head_sha=_HEAD,
         labels=(),
         is_draft=True,

@@ -35,10 +35,10 @@ class Services:
         ledger = LedgerAppendService(postgres, repository)
         sealed = SealedCallService(postgres, ledger, repository)
         opening = GateOpeningService(postgres, GateRepository(), sealed)
-        self.signoffs = SignoffService(postgres, ledger, repository)
+        self.signoffs = SignoffService(ledger)
         self.check = GateDecisionCheckService(self.signoffs)
         self.non_merge = NonMergeDecisionService(
-            postgres, GateRepository(), sealed, opening, ledger, repository
+            postgres, GateRepository(), sealed, opening, ledger
         )
         self.ledger = ledger
         self.repository = repository

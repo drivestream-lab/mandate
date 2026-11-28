@@ -10,7 +10,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from src.engine.gates.non_merge_rules import REQUEST_CHANGES_OPTION, decision_from_review
+from src.engine.gates.non_merge_rules import (
+    APPROVE_OPTION,
+    REQUEST_CHANGES_OPTION,
+    decision_from_answer,
+    decision_from_review,
+)
 from src.infra_services.github_app_service import GitHubAppService
 from src.infra_services.paperclip_service import PaperclipService
 from src.infra_services.postgres_service import PostgresService
@@ -18,7 +23,12 @@ from src.models.ledger_models import DecisionRecord, LedgerEntryType, RungType
 from src.models.paperclip_models import InteractionStatusType, NewIssue
 from src.models.signoff_models import GateDecisionStateType
 from tests.journeys.journey_support import StackAddresses
-from tests.journeys.sign_a_gate.conftest import GATE_RULE, SIGNER_LOGIN, SandboxDesk
+from tests.journeys.sign_a_gate.conftest import (
+    GATE_RULE,
+    SIGNER_LOGIN,
+    BoardUser,
+    SandboxDesk,
+)
 from tests.journeys.sign_a_gate.support import STAMP, ScriptedRole, Services, review_brief
 from tests.journeys.test_agents.conftest import AgentDesk
 
@@ -67,6 +77,22 @@ async def test_review_decision_is_sealed_first_recorded_with_its_holder_and_bloc
         is None
     )
 
+    # The holder changes their verdict on the same head: recorded as a correction of the first.
+    reviewed.signer_reviews("APPROVE")
+    changed = decision_from_review(
+        await github_app.read_pull_request(reviewed.ref), GATE_RULE.holders
+    )
+    assert changed is not None and changed.option_id == APPROVE_OPTION
+    correction = await services.non_merge.record_decision(
+        brief, changed, RungType.L0, datetime.now(UTC), STAMP
+    )
+    assert correction is not None and correction.entry_type == LedgerEntryType.CORRECTION
+    assert (await services.entry_types())[-3:] == [
+        LedgerEntryType.DECISION,
+        LedgerEntryType.DECISION,
+        LedgerEntryType.CORRECTION,
+    ]
+
     # A recorded no does not stop the merge gate beside it.
     after = await services.check.evaluate_and_post(github_app, merge_gate.ref, GATE_RULE, STAMP)
     assert after.state is GateDecisionStateType.SUCCESS
@@ -74,11 +100,11 @@ async def test_review_decision_is_sealed_first_recorded_with_its_holder_and_bloc
 
 
 @pytest.mark.req("REQ-121")
-async def test_paperclip_question_is_sealed_first_and_left_open_without_blocking(
+async def test_paperclip_question_is_sealed_first_answered_by_a_person_and_recorded(
     postgres: PostgresService,
     paperclip: PaperclipService,
     desk: AgentDesk,
-    sandbox_desk: SandboxDesk,
+    board_user: BoardUser,
 ) -> None:
     services = Services(postgres)
     work_item = uuid.uuid4()
@@ -95,5 +121,17 @@ async def test_paperclip_question_is_sealed_first_and_left_open_without_blocking
     assert await services.entry_types() == [LedgerEntryType.SEALED_CALL]
     assert opened.sealed.sealed_entry_hash
     assert question.status is InteractionStatusType.PENDING
-    open_questions = await paperclip.list_questions(issue.id)
-    assert [q.id for q in open_questions] == [question.id]
+    holders = frozenset({board_user.user_id})
+    assert decision_from_answer(question, "triage", holders) is None
+
+    board_user.answer(issue.id, question.id, "triage", "approve")
+
+    answered = (await paperclip.list_questions(issue.id))[0]
+    read = decision_from_answer(answered, "triage", holders)
+    assert read is not None and read.holder == board_user.user_id
+    entry = await services.non_merge.record_decision(
+        brief, read, RungType.L0, datetime.now(UTC), STAMP
+    )
+    assert entry is not None
+    record = DecisionRecord.model_validate(entry.payload)
+    assert record.actor == board_user.user_id and record.choice == "approve"

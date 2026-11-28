@@ -1,9 +1,10 @@
 """Signoff models: a pull request as read from GitHub, who holds a gate, and what the check says."""
 
+import re
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.models.gate_models import PullRequestRef
 from src.models.ledger_models import RungType
@@ -25,12 +26,27 @@ class ReviewStateType(StrEnum):
     PENDING = "PENDING"
 
 
+class ReviewerKindType(StrEnum):
+    """The kinds of account GitHub reports for a reviewer."""
+
+    USER = "User"
+    BOT = "Bot"
+    ORGANIZATION = "Organization"
+    MANNEQUIN = "Mannequin"
+
+
+GOVERNED_BRANCHES = frozenset({"develop", "main"})
+"""The lines every merge into which is a gate."""
+
+
 class PullReview(BaseModel):
     """One review on a pull request."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    review_id: int
     reviewer: str = Field(min_length=1)
+    reviewer_kind: ReviewerKindType
     state: ReviewStateType
     commit_id: str = Field(pattern=_SHA)
     body: str
@@ -43,10 +59,20 @@ class PullRequestSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     ref: PullRequestRef
+    base_ref: str = Field(min_length=1, description="The branch the pull request merges into")
     head_sha: str = Field(pattern=_SHA)
     labels: tuple[str, ...]
     is_draft: bool
     reviews: tuple[PullReview, ...]
+
+
+class OpenPull(BaseModel):
+    """An open pull request and the branch it merges into."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ref: PullRequestRef
+    base_ref: str
 
 
 class GateRule(BaseModel):
@@ -55,18 +81,31 @@ class GateRule(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     label: str = Field(min_length=1, pattern=_NON_BLANK)
+    branch: str = Field(min_length=1, description="The branch whose merge this gate decides")
     rung: RungType
     holders: frozenset[str] = Field(min_length=1, description="Logins that may sign this gate")
 
 
 class Attestation(BaseModel):
-    """What an Approve's body must carry: the initiative, the head and the gate it signs."""
+    """What an Approve's body must carry: initiative, head, digests, artifact paths, and the
+    gate, repository and pull request it signs. Every field is required; none may be added."""
 
-    model_config = ConfigDict(frozen=True, extra="allow")
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     initiative: str = Field(min_length=1, pattern=_NON_BLANK)
     head: str = Field(pattern=_SHA)
     gate: str = Field(min_length=1, pattern=_NON_BLANK)
+    repo: str = Field(min_length=1, pattern=_NON_BLANK)
+    pull_request: int = Field(gt=0)
+    digests: tuple[str, ...] = Field(min_length=1, description="Hex SHA-256 of each artifact")
+    artifact_paths: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("digests")
+    @classmethod
+    def _digests_are_sha256(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(re.fullmatch(r"[0-9a-f]{64}", item) is None for item in value):
+            raise ValueError("a digest must be a lowercase hex SHA-256")
+        return value
 
 
 class SignoffReading(BaseModel):

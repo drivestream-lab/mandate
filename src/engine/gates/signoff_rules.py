@@ -1,7 +1,7 @@
 """Reads a gate's signoff from a pull request snapshot. Pure: no IO, no clock.
 
 A signoff is three things on the current head: the gate's label, an Approve whose body carries
-the attestation for this head and gate, and the pull request marked ready. All three are
+the full attestation for this head, gate, repository and pull request, and the pull request marked ready. All three are
 required, and the Approve must come from someone who holds the gate at its rung. Nothing is
 assumed: a missing or unreadable part is a reason, never a pass. No timeout or default exists
 here, so a gate held by a person has no signoff until that person's Approve is on the head.
@@ -10,29 +10,33 @@ here, so a gate held by a person has no signoff until that person's Approve is o
 import yaml
 from pydantic import ValidationError
 
+from src.models.ledger_models import RungType
 from src.models.signoff_models import (
     Attestation,
     GateRule,
     PullRequestSnapshot,
     PullReview,
+    ReviewerKindType,
     ReviewStateType,
     SignoffAssessment,
     SignoffReading,
 )
 
 
-def read_attestation(body: str) -> Attestation | None:
-    """The attestation in a review body, or None when it is absent or does not fit."""
+def read_attestation(body: str) -> Attestation | str:
+    """The attestation in a review body, or the reason it is not one (names the field)."""
     try:
         document = yaml.safe_load(body)
     except yaml.YAMLError:
-        return None
+        return "the Approve body is not readable as an attestation"
     if not isinstance(document, dict) or "attestation" not in document:
-        return None
+        return "the Approve carries no attestation"
     try:
         return Attestation.model_validate(document["attestation"])
-    except ValidationError:
-        return None
+    except ValidationError as error:
+        fields = sorted({".".join(str(part) for part in item["loc"]) or "attestation"
+                         for item in error.errors()})  # fmt: skip
+        return "the attestation is missing or has a bad field: " + ", ".join(fields)
 
 
 def _standing_reviews(snapshot: PullRequestSnapshot) -> list[PullReview]:
@@ -46,7 +50,16 @@ def _standing_reviews(snapshot: PullRequestSnapshot) -> list[PullReview]:
 
 
 def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAssessment:
-    """The signoff on the current head for this gate, or the reason there is none."""
+    """The signoff on the current head for this gate, or the reason there is none.
+
+    Whoever applied the label or marked the pull request ready does not matter; the decision is
+    the holder's attested Approve on this head, for this gate, repository and pull request.
+    """
+    if snapshot.base_ref != rule.branch:
+        return _refused(
+            f"the pull request merges into {snapshot.base_ref}, not {rule.branch}, "
+            f"which gate {rule.label} decides"
+        )
     if rule.label not in snapshot.labels:
         return _refused(f"the gate label {rule.label} is not on the pull request")
     if snapshot.is_draft:
@@ -58,19 +71,35 @@ def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAsse
     ]
     if not approves:
         return _refused(f"no Approve stands on the current head {snapshot.head_sha}")
+    problems: list[str] = []
     matching: list[tuple[PullReview, Attestation]] = []
     for review in approves:
         attestation = read_attestation(review.body)
-        if (
-            attestation is not None
-            and attestation.head == snapshot.head_sha
+        if isinstance(attestation, str):
+            problems.append(attestation)
+        elif (
+            attestation.head == snapshot.head_sha
             and attestation.gate == rule.label
+            and attestation.repo == snapshot.ref.repo
+            and attestation.pull_request == snapshot.ref.number
         ):
             matching.append((review, attestation))
+        else:
+            problems.append("the attestation names another head, gate, repository or pull request")
     if not matching:
-        return _refused("no Approve on the head carries an attestation for this head and gate")
+        return _refused(problems[0])
+    refusals: list[str] = []
     for review, attestation in matching:
-        if review.reviewer in rule.holders:
+        if review.reviewer not in rule.holders:
+            refusals.append(
+                f"{review.reviewer} does not hold the gate {rule.label} at {rule.rung.value}"
+            )
+        elif rule.rung is RungType.L0 and review.reviewer_kind is not ReviewerKindType.USER:
+            refusals.append(
+                f"{review.reviewer} is a {review.reviewer_kind.value} account; "
+                f"an L0 gate is decided by a person"
+            )
+        else:
             return SignoffAssessment(
                 signoff=SignoffReading(
                     signer=review.reviewer,
@@ -81,8 +110,7 @@ def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAsse
                 ),
                 reason=None,
             )
-    signers = ", ".join(sorted({review.reviewer for review, _ in matching}))
-    return _refused(f"{signers} does not hold the gate {rule.label} at {rule.rung.value}")
+    return _refused("; ".join(refusals))
 
 
 def _refused(reason: str) -> SignoffAssessment:

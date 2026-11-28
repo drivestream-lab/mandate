@@ -13,9 +13,7 @@ from injector import inject
 
 from src.business_services.base_business_service import BaseBusinessService
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
-from src.database.postgres.repository.ledger.ledger_repository import LedgerRepository
 from src.engine.gates.signoff_rules import assess_signoff
-from src.infra_services.postgres_service import PostgresService
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
 from src.models.ledger_models import DecisionOption, DecisionRecord, StoredLedgerEntry
@@ -41,16 +39,9 @@ class SignoffService(BaseBusinessService):
     """Reads signoffs and records them."""
 
     @inject
-    def __init__(
-        self,
-        postgres_service: PostgresService,
-        ledger: LedgerAppendService,
-        ledger_repository: LedgerRepository,
-    ) -> None:
+    def __init__(self, ledger: LedgerAppendService) -> None:
         super().__init__()
-        self._postgres = postgres_service
         self._ledger = ledger
-        self._ledger_repository = ledger_repository
 
     async def read_signoff(
         self, reader: PullRequestReader, ref: PullRequestRef, rule: GateRule
@@ -60,19 +51,14 @@ class SignoffService(BaseBusinessService):
         return snapshot, assess_signoff(snapshot, rule)
 
     async def is_recorded(self, signoff: SignoffReading, rule: GateRule) -> bool:
-        """True when the ledger already holds this signer's decision on this head."""
-        async with self._postgres.get_session() as session:
-            found = await self._ledger_repository.find_decision(
-                session, signoff.signer, rule.label, signoff.head_sha
-            )
-        return found is not None
+        """True when the ledger holds this signer's decision on this head."""
+        choice = await self._ledger.latest_choice(signoff.signer, rule.label, signoff.head_sha)
+        return choice == SIGNOFF_CHOICE
 
     async def record_signoff(
         self, signoff: SignoffReading, rule: GateRule, stamp: VersionStamp
     ) -> StoredLedgerEntry | None:
-        """Write the signer's decision unless it is already there; None when it was."""
-        if await self.is_recorded(signoff, rule):
-            return None
+        """Write the signer's decision once per head; None when it was already there."""
         record = DecisionRecord(
             actor=signoff.signer,
             role=rule.label,
@@ -88,4 +74,6 @@ class SignoffService(BaseBusinessService):
             model_version=_IDENTITY_VERSION,
             decided_at=signoff.signed_at,
         )
-        return await self._ledger.append_decision(record, stamp)
+        return await self._ledger.record_decision_once(
+            record, stamp, "the signoff on this head changed"
+        )

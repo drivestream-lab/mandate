@@ -30,6 +30,7 @@ from tests.journeys.decide_blind_first.test_call_sealed_before_the_holder_sees_t
 from tests.journeys.journey_support import SANDBOX_REPOS, AppCredentials, SandboxGitHub
 from tests.journeys.test_agents.conftest import agent_host, desk
 from tests.contract.paperclip.conftest import mandate_identity, paperclip
+from tests.contract.paperclip.paperclip_stack import MandateIdentity
 
 __all__ = [
     "agent_host",
@@ -44,8 +45,15 @@ OWNER = "drivestream-lab"
 REPO = SANDBOX_REPOS[1]
 GATE_LABEL = "spec-lgtm"
 SIGNER_LOGIN = "mandate-challenger[bot]"
-GATE_RULE = GateRule(label=GATE_LABEL, rung=RungType.L0, holders=frozenset({SIGNER_LOGIN}))
-"""The test gate configuration: the challenger holds the sandbox gates at L0."""
+GATE_RULE = GateRule(
+    label=GATE_LABEL, branch="develop", rung=RungType.L2, holders=frozenset({SIGNER_LOGIN})
+)
+"""The test gate configuration: the sandbox gates are at L2, so the deciding role, here the
+challenger App, signs and may be an App."""
+L0_GATE_RULE = GateRule(
+    label=GATE_LABEL, branch="develop", rung=RungType.L0, holders=frozenset({SIGNER_LOGIN})
+)
+"""The same gate at L0, where only a person may sign: an App's Approve is refused."""
 
 _SECRETS = Path.home() / ".mandate" / "secrets" / "test"
 
@@ -118,6 +126,7 @@ class SandboxPullRequest:
         self._author = author
         self._signer = signer
         self._mandate = mandate
+        self._extra: list[int] = []
 
     def head_sha(self) -> str:
         with _client(self._mandate) as client:
@@ -157,7 +166,36 @@ class SandboxPullRequest:
             ).raise_for_status()
 
     def attestation(self) -> str:
-        return f"attestation:\n  initiative: INIT-JOURNEY\n  head: {self.head_sha()}\n  gate: {GATE_LABEL}\n"
+        return (
+            "attestation:\n  initiative: INIT-JOURNEY\n"
+            f"  head: {self.head_sha()}\n  gate: {GATE_LABEL}\n  repo: {REPO}\n"
+            f"  pull_request: {self.ref.number}\n  digests: ['{'c' * 64}']\n"
+            "  artifact_paths: [journey.txt]\n"
+        )
+
+    def retarget(self, base: str) -> None:
+        """The author changes the pull request's base branch."""
+        with _client(self._author) as client:
+            client.patch(f"/pulls/{self.ref.number}", json={"base": base}).raise_for_status()
+
+    def open_second_pull_on_same_head(self, name: str) -> int:
+        """Another open pull request into develop whose head is this very commit."""
+        head = self.head_sha()
+        branch = f"{self._branch}-{name}"
+        with _client(self._author) as client:
+            client.post(
+                "/git/refs", json={"ref": f"refs/heads/{branch}", "sha": head}
+            ).raise_for_status()
+            created = _Created.model_validate_json(
+                client.post(
+                    "/pulls",
+                    json={"title": f"[journey] {name}", "head": branch, "base": "develop"},
+                )
+                .raise_for_status()
+                .content
+            )
+        self._extra.append(created.number)
+        return created.number
 
     def signer_marks_ready(self) -> None:
         with _client(self._signer) as client:
@@ -201,7 +239,8 @@ class SandboxPullRequest:
 
     def close(self) -> None:
         with _client(self._author) as client:
-            client.patch(f"/pulls/{self.ref.number}", json={"state": "closed"})
+            for number in (self.ref.number, *self._extra):
+                client.patch(f"/pulls/{number}", json={"state": "closed"})
 
 
 class SandboxDesk:
@@ -295,3 +334,35 @@ async def github_app() -> AsyncIterator[GitHubAppService]:
         yield service
     finally:
         await service.close()
+
+
+class BoardUser:
+    """The test stack's Paperclip board user, who answers questions as a person."""
+
+    def __init__(self, identity: MandateIdentity) -> None:
+        self.user_id = identity.board_user_id
+        self._http = httpx.Client(
+            base_url=identity.base_url, headers={"Origin": identity.base_url}, timeout=60
+        )
+        self._http.post(
+            "/api/auth/sign-in/email",
+            json={"email": identity.board_email, "password": identity.board_password},
+        ).raise_for_status()
+
+    def answer(self, issue_id: str, question_id: str, answer_id: str, option_id: str) -> None:
+        self._http.post(
+            f"/api/issues/{issue_id}/interactions/{question_id}/respond",
+            json={"answers": [{"questionId": answer_id, "optionIds": [option_id]}]},
+        ).raise_for_status()
+
+    def close(self) -> None:
+        self._http.close()
+
+
+@pytest.fixture
+def board_user(mandate_identity: MandateIdentity) -> Iterator[BoardUser]:
+    user = BoardUser(mandate_identity)
+    try:
+        yield user
+    finally:
+        user.close()
