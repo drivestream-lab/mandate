@@ -224,9 +224,9 @@ _CP, _TIP, _BASE = "1" * 40, "2" * 40, "3" * 40
 
 @pytest.mark.req("REQ-122")
 def test_identical_judges_nothing_and_ahead_walks_to_the_checkpoint_by_ahead_by() -> None:
-    same = plan_walk(CompareResult(status="identical", ahead_by=0, merge_base=_CP), _CP)
+    same = plan_walk(CompareResult(status="identical", ahead_by=0, merge_base=_CP), _CP, 50)
     assert same is not None and same.nothing_to_judge and not same.rewritten
-    ahead = plan_walk(CompareResult(status="ahead", ahead_by=500, merge_base=_CP), _CP)
+    ahead = plan_walk(CompareResult(status="ahead", ahead_by=500, merge_base=_CP), _CP, 50)
     assert ahead is not None and not ahead.nothing_to_judge and not ahead.rewritten
     assert ahead.stop_at == _CP and ahead.limit == 500
 
@@ -234,7 +234,7 @@ def test_identical_judges_nothing_and_ahead_walks_to_the_checkpoint_by_ahead_by(
 @pytest.mark.req("REQ-122")
 def test_a_rewrite_is_recorded_and_the_landings_above_the_merge_base_are_still_judged() -> None:
     for status in ("diverged", "behind"):
-        plan = plan_walk(CompareResult(status=status, ahead_by=2, merge_base=_BASE), _CP)
+        plan = plan_walk(CompareResult(status=status, ahead_by=2, merge_base=_BASE), _CP, 50)
         assert plan is not None and plan.rewritten and not plan.nothing_to_judge
         assert plan.stop_at == _BASE and plan.limit == 2
     # an unguarded merge above the merge base is judged as any other landing
@@ -253,9 +253,26 @@ def test_a_rewrite_is_recorded_and_the_landings_above_the_merge_base_are_still_j
 
 
 @pytest.mark.req("REQ-122")
-def test_a_comparison_that_failed_or_is_not_understood_judges_nothing() -> None:
-    assert plan_walk(None, _CP) is None
-    assert plan_walk(CompareResult(status="surprising", ahead_by=1, merge_base=_CP), _CP) is None
+def test_a_comparison_that_failed_is_a_rewrite_and_the_tip_is_still_judged_and_reverted() -> None:
+    for compare in (None, CompareResult(status="surprising", ahead_by=1, merge_base=_CP)):
+        plan = plan_walk(compare, _CP, 50)
+        # recorded as a rewrite, walked from the tip back the first sweep's depth, checkpoint stays
+        assert plan.rewritten and plan.comparison_failed and not plan.nothing_to_judge
+        assert plan.stop_at is None and plan.limit == 50
+    merge = MergeObservation(
+        repo="r",
+        branch="develop",
+        merge_commit=_TIP,
+        head_sha=_TIP,
+        merged_by="someone",
+        merged_at=_T,
+        pull_number=3,
+        node_id="PR_x",
+        statuses=(),
+    )
+    # an unguarded merge at the tip is a breach, and a merged pull request gets its revert
+    assert judge_merge(merge, _APP, frozenset(), frozenset()) is MergeVerdictType.BREACH
+    assert revert_due(revertable=merge.node_id is not None, revert_recorded=False) is True
 
 
 @pytest.mark.req("REQ-122")

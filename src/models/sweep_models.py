@@ -41,6 +41,10 @@ class WalkPlan(BaseModel):
     rewritten: bool
     stop_at: str | None
     limit: int = Field(ge=0)
+    comparison_failed: bool = Field(
+        default=False,
+        description="The comparison failed or was not understood; the checkpoint stays",
+    )
 
 
 class PullMerge(BaseModel):

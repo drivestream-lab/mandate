@@ -48,30 +48,38 @@ def walk_complete(current: str | None, stop_at: str | None, steps: int, limit: i
     return current is None or current == stop_at or steps >= limit
 
 
-def plan_walk(compare: CompareResult | None, checkpoint: str) -> WalkPlan | None:
-    """What to walk given how the tip compares with the checkpoint; None when the answer is not
-    one this knows (an error or an unknown status), which fails closed.
+def plan_walk(compare: CompareResult | None, checkpoint: str, max_depth: int) -> WalkPlan:
+    """What to walk given how the tip compares with the checkpoint.
+
+    A comparison that failed (None) or is not understood is treated as a rewrite whose extent is
+    unknown (an orphan force-push has no shared history, so GitHub answers 404): the tip is
+    walked back `max_depth` first parents and judged as usual, the failure is recorded, and the
+    checkpoint stays.
 
     identical: nothing to judge. ahead: from the tip to the checkpoint, at most ahead_by steps.
     behind or diverged: the branch was rewritten; judge from the merge base to the tip, at most
     ahead_by steps, after recording the rewrite.
     """
-    if compare is None:
-        return None
-    if compare.status == "identical":
+    if compare is not None and compare.status == "identical":
         return WalkPlan(nothing_to_judge=True, rewritten=False, stop_at=checkpoint, limit=0)
-    if compare.status == "ahead":
+    if compare is not None and compare.status == "ahead":
         return WalkPlan(
             nothing_to_judge=False, rewritten=False, stop_at=checkpoint, limit=compare.ahead_by
         )
-    if compare.status in ("behind", "diverged"):
+    if compare is not None and compare.status in ("behind", "diverged"):
         return WalkPlan(
             nothing_to_judge=False,
             rewritten=True,
             stop_at=compare.merge_base,
             limit=compare.ahead_by,
         )
-    return None
+    return WalkPlan(
+        nothing_to_judge=False,
+        rewritten=True,
+        stop_at=None,
+        limit=max_depth,
+        comparison_failed=True,
+    )
 
 
 def seed_allowed(existing_checkpoint: str | None) -> bool:

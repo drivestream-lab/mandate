@@ -3,7 +3,7 @@ check, and gate rulesets or branch protection that are not what a decided Launch
 
 Landings. Each of develop and main is walked from its current tip back through first parents
 to the tip the previous sweep recorded in the ledger (the checkpoint, written by Mandate); the
-first sweep has none and goes back as far as `max_depth` landings; once there is one, GitHub's compare bounds the walk: identical judges nothing, ahead walks at most ahead_by first parents to the checkpoint, and behind or diverged (a rewrite) is recorded and escalated at once and the landings above the merge base are judged all the same. A comparison that fails judges nothing and moves nothing. Commit dates are never used.
+first sweep has none and goes back as far as `max_depth` landings; once there is one, GitHub's compare bounds the walk: identical judges nothing, ahead walks at most ahead_by first parents to the checkpoint, and behind or diverged (a rewrite) is recorded and escalated at once and the landings above the merge base are judged all the same. A comparison that fails or is not understood (an orphan force-push has no shared history) is recorded as a rewrite, and the tip is still walked back `max_depth` landings and judged; the checkpoint stays. Commit dates are never used.
 A landing that is a merged pull request's merge commit is judged on the head that was merged: the
 newest mandate/gate-decision at or before GitHub's merge time must be a success posted by
 Mandate's App. A landing that is not (a push, or a rebase merge) is a breach whatever statuses it
@@ -191,35 +191,38 @@ class UnguardedMergeSweepService(BaseBusinessService):
         stop_at: str | None = None
         limit = config.max_depth
         rewritten = False
+        failed = False
         if checkpoint is not None:
             # How far the tip is from the checkpoint is GitHub's answer, not a guess: it bounds
             # the walk. An answer that cannot be had or understood judges nothing.
             try:
-                plan = plan_walk(await github.compare(repo, checkpoint, tip), checkpoint)
+                compared: CompareResult | None = await github.compare(repo, checkpoint, tip)
             except Exception as error:
-                self._escalate(
-                    found, repo, subject, f"could not be compared ({type(error).__name__})"
-                )
-                return
-            if plan is None:
-                self._escalate(
-                    found, repo, subject, "the comparison with the checkpoint is unknown"
-                )
-                return
+                compared = None
+                self.logger.error("comparison failed", repo=repo, error=type(error).__name__)
+            plan = plan_walk(compared, checkpoint, config.max_depth)
             if plan.nothing_to_judge:
                 return
             stop_at, limit, rewritten = plan.stop_at, plan.limit, plan.rewritten
-        complete = True
+            failed = plan.comparison_failed
+        complete = not failed
         if rewritten:
-            # Recorded and escalated at once; the landings above the merge base are still judged.
-            complete = await self._record_unrevertable(
+            # Recorded and escalated at once; the landings are still judged: from the merge base,
+            # or, when the comparison failed, back the first sweep's depth from the tip.
+            what = (
+                f"{branch} could not be compared with the checkpoint {checkpoint}"
+                if failed
+                else f"{branch} no longer descends from the checkpoint {checkpoint}"
+            )
+            recorded = await self._record_unrevertable(
                 found,
                 repo,
                 f"{branch} rewritten@{tip[:12]}",
                 BreachKindType.REWRITTEN_BRANCH,
-                f"{branch} no longer descends from the checkpoint {checkpoint}: it was rewritten",
+                f"{what}: it was rewritten",
                 stamp,
             )
+            complete = complete and recorded
         try:
             line, stopped = await self._first_parent_line(github, repo, tip, stop_at, limit)
         except Exception as error:
