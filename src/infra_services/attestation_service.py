@@ -334,15 +334,16 @@ class AttestationService(BaseInfraService):
         )
         try:
             parsed = Bundle.from_json(json.dumps(bundle))
-        except ValueError as error:
+        except (SigstoreError, ValueError) as error:
             raise EvidenceRefusal(f"the Sigstore verification failed: {error}") from error
         try:
             payload = await asyncio.to_thread(self._verify_dsse, parsed, policy)
         except (SigstoreError, ValueError) as error:
             older = _signed_by_older_head(parsed, self._settings.signer_identity, signer_commit)
             if older is not None:
+                shown = older if re.fullmatch(r"[0-9a-f]{40}", older) else "an unrecognised commit"
                 raise EvidenceRefusal(
-                    f"signed by mandate-verify {older}, "
+                    f"signed by mandate-verify {shown}, "
                     f"{self._settings.signer_branch} is now {signer_commit}"
                 ) from error
             raise EvidenceRefusal(f"the Sigstore verification failed: {error}") from error

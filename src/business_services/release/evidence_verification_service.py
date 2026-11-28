@@ -240,7 +240,7 @@ class EvidenceVerificationService(BaseBusinessService):
             except EvidenceRefusal as refusal:
                 failures.append(refusal.reason)
         else:
-            raise EvidenceRefusal(failures[0])
+            raise EvidenceRefusal("; ".join(failures))
         bundle, _ = read_bundle(tarball)
         recomputed = await self.test_set_digest_at(
             target.repository, target.commit, target.test_set, target.plugins
