@@ -1,10 +1,10 @@
 """Fixtures for evidence journeys: real workflow runs on mandate-sandbox-svc.
 
 Three callers are pushed to branches under this run's namespace (the session cleanup deletes
-the branches): one pinned to the signer tag, one whose own workflow attests a forged bundle
-inside the sandbox repo, and one pinned to the signer tag over a failing test. Each run is
-waited for. The signer tag is a setting (EVIDENCE_SIGNER_REF); the journeys exercise whatever
-tag it names. The callers are pushed by the author, mandate-builder
+the branches): one calling the signer workflow on main, one whose own workflow attests a forged bundle
+inside the sandbox repo, and one calling the signer workflow on main over a failing test. Each run is
+waited for. The signer branch is a setting (EVIDENCE_SIGNER_REF, default refs/heads/main); the callers
+call the signer workflow on that branch. The callers are pushed by the author, mandate-builder
 (MANDATE_JOURNEY_AUTHOR_TOKEN; a missing token fails the run at once). Mandate's own test App
 never pushes a workflow file: it reads runs, artifacts, trees and attestations. Nothing is mocked.
 """
@@ -86,7 +86,7 @@ class EvidenceRun:
         )
 
 
-def _caller(name: str, branch: str, signer_tag: str) -> str:
+def _caller(name: str, branch: str, signer_branch: str) -> str:
     return f"""name: {name}
 on:
   push:
@@ -97,7 +97,7 @@ permissions:
   attestations: write
 jobs:
   verify:
-    uses: drivestream-lab/mandate-verify/.github/workflows/verify.yml@{signer_tag}
+    uses: drivestream-lab/mandate-verify/.github/workflows/verify.yml@{signer_branch}
     with:
       commit: ${{{{ github.sha }}}}
 """
@@ -247,7 +247,7 @@ def evidence_runs(
     """The real runs: pinned (passes), edited caller (signs for itself), a failing test, and a
     pinned caller over an edited protected test (a valid signature, the wrong test set)."""
     pusher = _Pusher(author_token, run_namespace)
-    tag = evidence_settings.signer_tag
+    branch = evidence_settings.signer_branch
     names = ("pinned", "edited", "failing", "tampered")
     branches = {name: pusher.branch_from_develop(f"evidence-{name}") for name in names}
     pusher.commit_file(
@@ -266,7 +266,7 @@ def evidence_runs(
             (
                 _edited_caller(f"evidence-{name}", branches[name])
                 if name == "edited"
-                else _caller(f"evidence-{name}", branches[name], tag)
+                else _caller(f"evidence-{name}", branches[name], branch)
             ),
         )
         for name in names

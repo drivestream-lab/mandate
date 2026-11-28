@@ -3,17 +3,17 @@
 Mandate accepts evidence only when every check below holds; any failure is a hard refusal
 that names its reason, and refused evidence counts as missing:
 
-- the live signer tag still points at the pinned signer commit (a setting; a moved tag is
-  refused and logged as an escalation), the Sigstore bundle verifies, the signer is exactly
-  the pinned workflow at the pinned tag, the signer digest equals the pinned commit, and the
-  run's source repository and commit are the target's;
+- the Sigstore bundle verifies, the signer is exactly the signer workflow on the trusted
+  branch (main), the build signer digest equals that branch's head read live once for this
+  verification (no grace for an earlier head: "signed by mandate-verify <sha>, main is now
+  <sha>"), and the run's source repository and commit are the target's;
 - the attested subject is the sha256 of the evidence tarball that was downloaded;
 - the tarball holds exactly the six bundle files, each as hashed in binding.json, and the
   binding, report and environment manifest are for the target commit and consistent;
 - the binding's protected test-set digest equals the digest fixed at spec sign-off, which the
   caller supplies in the target (the recorded spec signoff), and also the digest Mandate
   recomputes from git at that commit in the format the signer's README documents; the tools
-  digest equals the signer workflow's VERIFY_TOOLS_DIGEST at the pinned commit; the
+  digest equals the signer workflow's VERIFY_TOOLS_DIGEST at that head; the
   quarantine, test set and plugins are the target's;
 - the result is pass, and the evidence is for exactly the latest run attempt of the caller
   workflow for the commit (a newer attempt without evidence, or one that failed, refuses).
@@ -226,17 +226,7 @@ class EvidenceVerificationService(BaseBusinessService):
     ) -> VerifiedEvidence:
         service = self._attestations
         digest = sha256_hex(tarball)
-        signer_commit = service.settings.signer_commit
-        live = await service.live_tag_commit()
-        if live != signer_commit:
-            tag = service.settings.signer_tag
-            self.logger.error(
-                "evidence escalation: the signer tag moved",
-                tag=tag,
-                live=live,
-                pinned=signer_commit,
-            )
-            raise EvidenceRefusal(f"the {tag} tag moved: it points at {live}, not {signer_commit}")
+        signer_commit = await service.signer_head()
         bundles = await service.attestations(target.repository, digest)
         if not bundles:
             raise EvidenceRefusal("no attestation exists for the downloaded evidence")

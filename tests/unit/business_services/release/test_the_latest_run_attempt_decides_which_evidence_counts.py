@@ -1,23 +1,17 @@
-"""The latest run attempt of the caller workflow decides, and a moved signer tag is refused.
+"""The latest run attempt of the caller workflow decides which evidence counts.
 
-The run and artifact listings are shaped like GitHub's; the pure selection and the refusal
-before any signature work are what is tested.
+The run and artifact listings are shaped like GitHub's; the pure selection is what is tested.
 """
 
 import pytest
 
-from src.business_services.release.evidence_verification_service import (
-    EvidenceVerificationService,
-)
-from src.configs.evidence_settings import EvidenceSettings
 from src.infra_services.attestation_service import (
     ArtifactListing,
-    AttestationService,
     RunListing,
     evidence_item,
     newest_caller_run,
 )
-from src.models.evidence_models import EvidenceArtifact, EvidenceRefusal, EvidenceTarget
+from src.models.evidence_models import EvidenceRefusal
 
 COMMIT = "a" * 40
 WORKFLOW = ".github/workflows/verify.yml"
@@ -72,31 +66,3 @@ def test_the_newest_run_decides_and_must_have_finished() -> None:
 def test_evidence_must_be_for_exactly_the_latest_attempt() -> None:
     run = _run(7, 2, "2026-11-28T01:00:00Z")
     assert evidence_item([_artifact(1), _artifact(2)], COMMIT, run).id == 2
-
-
-class _MovedTag(AttestationService):
-    """The real service with only the live tag read answered by a fixed value."""
-
-    async def live_tag_commit(self) -> str:
-        return "c" * 40
-
-
-async def _token() -> str:
-    return "not used"
-
-
-@pytest.mark.req("REQ-108")
-async def test_a_signer_tag_that_no_longer_points_at_the_pinned_commit_is_refused() -> None:
-    service = EvidenceVerificationService(_MovedTag(_token, EvidenceSettings()))
-    target = EvidenceTarget(
-        repository="o/r",
-        commit=COMMIT,
-        caller_workflow=WORKFLOW,
-        test_set=("tests/unit",),
-        expected_test_set_digest="1" * 64,
-    )
-    artifact = EvidenceArtifact(
-        artifact_id=1, run_id=7, run_attempt=1, created_at="x", size_bytes=1
-    )
-    with pytest.raises(EvidenceRefusal, match="evidence-1 tag moved"):
-        await service.verify_bytes(target, b"anything", artifact)
