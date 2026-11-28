@@ -166,3 +166,40 @@ class RecheckReport(BaseModel):
 
     outcomes: tuple[GateDecisionOutcome, ...]
     escalations: tuple[EscalationNote, ...]
+
+
+MANDATE_ACTOR = "mandate"
+"""Who the ledger names for what Mandate itself records, such as a voided signoff."""
+
+
+class ArtifactLink(BaseModel):
+    """A pull request whose change makes another pull request's signoff stale.
+
+    The caller passes the links it knows; nothing is discovered or stored here.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    upstream: PullRequestRef
+    downstream: PullRequestRef
+
+
+class DecisionLink(BaseModel):
+    """A pull request holding a non-merge decision, and the merge pull request downstream of it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    artifact: PullRequestRef
+    downstream: PullRequestRef
+    decision_role: str = Field(
+        min_length=1, pattern=_NON_BLANK, description="The role the decision is recorded under"
+    )
+
+
+class UpstreamHead(BaseModel):
+    """The head an upstream pull request had when a downstream signoff was recorded."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    upstream: PullRequestRef
+    head_sha: str = Field(pattern=_SHA)

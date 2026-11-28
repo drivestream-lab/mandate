@@ -7,6 +7,7 @@ the decision is in the ledger before it passes. This service only reads GitHub a
 ledger; it never signs.
 """
 
+from collections.abc import Sequence
 from typing import Protocol
 
 from injector import inject
@@ -14,6 +15,7 @@ from injector import inject
 from src.business_services.base_business_service import BaseBusinessService
 from src.business_services.ledger.ledger_append_service import LedgerAppendService
 from src.engine.gates.signoff_rules import assess_signoff
+from src.engine.gates.voiding_rules import upstream_evidence
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
 from src.models.ledger_models import DecisionOption, DecisionRecord, StoredLedgerEntry
@@ -22,6 +24,7 @@ from src.models.signoff_models import (
     PullRequestSnapshot,
     SignoffAssessment,
     SignoffReading,
+    UpstreamHead,
 )
 
 SIGNOFF_CHOICE = "signed"
@@ -56,9 +59,17 @@ class SignoffService(BaseBusinessService):
         return choice == SIGNOFF_CHOICE
 
     async def record_signoff(
-        self, signoff: SignoffReading, rule: GateRule, stamp: VersionStamp
+        self,
+        signoff: SignoffReading,
+        rule: GateRule,
+        stamp: VersionStamp,
+        upstream: Sequence[UpstreamHead] = (),
     ) -> StoredLedgerEntry | None:
-        """Write the signer's decision once per head; None when it was already there."""
+        """Write the signer's decision once per head; None when it was already there.
+
+        The entry names the upstream heads the signoff was written against, so a later change
+        to one of them can be told.
+        """
         record = DecisionRecord(
             actor=signoff.signer,
             role=rule.label,
@@ -68,7 +79,7 @@ class SignoffService(BaseBusinessService):
             ),
             choice=SIGNOFF_CHOICE,
             reasons=(f"{signoff.label} applied, Approve with attestation, pull request ready",),
-            evidence=(),
+            evidence=upstream_evidence(upstream),
             target_version=signoff.head_sha,
             workflow_version=_WORKFLOW_VERSION,
             model_version=_IDENTITY_VERSION,

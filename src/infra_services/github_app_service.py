@@ -7,7 +7,9 @@ that does not fit the expected shape raises; nothing is guessed.
 """
 
 import time
+from collections.abc import Mapping
 from datetime import datetime
+from urllib.parse import quote
 
 import httpx
 from injector import NoInject, inject
@@ -194,6 +196,17 @@ class GitHubAppService(BaseInfraService):
         }
         await self._post(path, body, repeatable=True)
 
+    async def add_label(self, ref: PullRequestRef, label: str) -> None:
+        """Put a label on a pull request (adding one that is already there changes nothing)."""
+        repo = f"/repos/{self._settings.owner}/{ref.repo}"
+        await self._post(f"{repo}/issues/{ref.number}/labels", {"labels": [label]}, repeatable=True)
+
+    async def remove_label(self, ref: PullRequestRef, label: str) -> None:
+        """Take a label off a pull request. Not repeated: a second attempt would find it gone."""
+        repo = f"/repos/{self._settings.owner}/{ref.repo}"
+        path = f"{repo}/issues/{ref.number}/labels/{quote(label, safe='')}"
+        self._raise_for_status(await self._send("DELETE", path, None, None, False), path)
+
     async def post_brief(self, pull_request: PullRequestRef, body: str) -> None:
         """Post a gate's brief as a comment on its pull request."""
         repo = f"/repos/{self._settings.owner}/{pull_request.repo}"
@@ -234,7 +247,9 @@ class GitHubAppService(BaseInfraService):
         self._raise_for_status(response, path)
         return response
 
-    async def _post(self, path: str, body: dict[str, str], repeatable: bool = False) -> None:
+    async def _post(
+        self, path: str, body: Mapping[str, str | list[str]], repeatable: bool = False
+    ) -> None:
         self._raise_for_status(await self._send("POST", path, None, body, repeatable), path)
 
     async def _send(
@@ -242,7 +257,7 @@ class GitHubAppService(BaseInfraService):
         method: str,
         path: str,
         params: dict[str, int | str] | None,
-        body: dict[str, str] | None,
+        body: Mapping[str, str | list[str]] | None,
         repeatable: bool,
     ) -> httpx.Response:
         """One call; a repeatable one is tried again after a dropped connection or a 5xx."""
