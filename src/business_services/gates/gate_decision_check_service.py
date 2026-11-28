@@ -257,6 +257,7 @@ class GateDecisionCheckService(BaseBusinessService):
         all_rules = scope.rules
         snapshot, assessment = await self._signoffs.read_signoff(github, ref, rule)
         head = snapshot.head_sha
+        await self._signoffs.record_edited_approves(snapshot, rule, stamp)
         if more_than_one_gate_label(snapshot.labels, snapshot.base_ref, all_rules):
             return ambiguous_gate(head)
         candidates: list[OpenPull] = []
@@ -273,25 +274,33 @@ class GateDecisionCheckService(BaseBusinessService):
             for link in scope.links
             if link.downstream == ref
         ]
-        if may_record:
-            await self._signoffs.record_signoff(signoff, rule, stamp)
-        elif not await self._signoffs.is_recorded(signoff, rule):
-            return not_recorded_for_recheck(head, rule)
-        recorded = await self._signoffs.is_recorded(signoff, rule)
-        if not recorded:
-            return outcome_after_recording(head, rule, signoff, recorded)
-        stale = await self._voiding.stale_failure(
-            github, snapshot, signoff, rule, upstream_now, stamp
-        )
-        if stale is not None:
-            return failure(head, stale)
-        voided = await self._voiding.void_failure(snapshot, signoff, rule)
-        if voided is not None:
-            return failure(head, voided)
+        stale: str | None = None
+        for _ in range(len(snapshot.reviews) + 1):
+            if may_record:
+                await self._signoffs.record_signoff(signoff, rule, stamp)
+            elif not await self._signoffs.is_recorded(signoff, rule):
+                return not_recorded_for_recheck(head, rule)
+            if not await self._signoffs.is_recorded(signoff, rule):
+                return outcome_after_recording(head, rule, signoff, False)
+            edited = await self._signoffs.attestation_failure(signoff, rule, stamp, may_record)
+            if edited is not None:
+                return failure(head, edited)
+            stale = await self._voiding.stale_failure(
+                github, snapshot, signoff, rule, upstream_now, stamp
+            )
+            if stale is None:
+                break
+            # The stale void names this Approve; another holder's Approve may still stand.
+            snapshot, assessment = await self._signoffs.read_signoff(github, ref, rule)
+            if snapshot.head_sha != head or assessment.signoff is None:
+                return failure(head, stale)
+            signoff = assessment.signoff
+        else:
+            return failure(head, stale or failure_after_fault(head, "StaleLoop").reason)
         unresolved = await self._voiding.unresolved_no_failure(github, ref, scope.decision_links)
         if unresolved is not None:
             return failure(head, unresolved)
-        passed = outcome_after_recording(head, rule, signoff, recorded)
+        passed = outcome_after_recording(head, rule, signoff, True)
         wave_refusal, verified = await self._wave_evidence(scope, ref, rule, head)
         if wave_refusal is not None:
             return wave_refusal

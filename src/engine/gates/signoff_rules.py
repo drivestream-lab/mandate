@@ -7,6 +7,8 @@ assumed: a missing or unreadable part is a reason, never a pass. No timeout or d
 here, so a gate held by a person has no signoff until that person's Approve is on the head.
 """
 
+import hashlib
+
 import yaml
 from pydantic import ValidationError
 
@@ -49,7 +51,9 @@ def _standing_reviews(snapshot: PullRequestSnapshot) -> list[PullReview]:
     return list(latest.values())
 
 
-def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAssessment:
+def assess_signoff(
+    snapshot: PullRequestSnapshot, rule: GateRule, excluded: frozenset[int] = frozenset()
+) -> SignoffAssessment:
     """The signoff on the current head for this gate, or the reason there is none.
 
     Whoever applied the label or marked the pull request ready does not matter; the decision is
@@ -67,7 +71,9 @@ def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAsse
     approves = [
         review
         for review in _standing_reviews(snapshot)
-        if review.state is ReviewStateType.APPROVED and review.commit_id == snapshot.head_sha
+        if review.review_id not in excluded
+        and review.state is ReviewStateType.APPROVED
+        and review.commit_id == snapshot.head_sha
     ]
     if not approves:
         return _refused(f"no Approve stands on the current head {snapshot.head_sha}")
@@ -105,6 +111,8 @@ def assess_signoff(snapshot: PullRequestSnapshot, rule: GateRule) -> SignoffAsse
                     signer=review.reviewer,
                     label=rule.label,
                     head_sha=snapshot.head_sha,
+                    review_id=review.review_id,
+                    body_digest=hashlib.sha256(review.body.encode()).hexdigest(),
                     signed_at=review.submitted_at,
                     attestation=attestation,
                 ),

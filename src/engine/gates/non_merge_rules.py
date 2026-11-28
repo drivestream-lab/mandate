@@ -67,11 +67,10 @@ def decision_from_answer(
     return None
 
 
-def decision_role(gate_class: GateClassType, gate_id: UUID | None) -> str:
-    """The role a decision is recorded under: its class, and its own gate when it has one.
+def decision_role(gate_class: GateClassType, gate_id: UUID) -> str:
+    """The role a decision is recorded under: its class and its own gate.
 
     Two decisions of the same class on different gates are different roles, so one holder's
     word on one never stands in for another.
     """
-    base = f"{gate_class.value} decision"
-    return base if gate_id is None else f"{base} {gate_id}"
+    return f"{gate_class.value} decision {gate_id}"

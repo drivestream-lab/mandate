@@ -45,6 +45,14 @@ class Services:
         self.repository = repository
         self.postgres = postgres
 
+    async def decisions_by(self, actor: str) -> int:
+        """How many decisions the ledger holds from this actor (Mandate's own records are its own)."""
+        async with self.postgres.get_session() as session:
+            entries = await self.repository.read_all(session)
+        return len(
+            [e for e in entries if e.entry_type == "decision" and e.payload.get("actor") == actor]
+        )
+
     async def entry_types(self) -> list[str]:
         async with self.postgres.get_session() as session:
             return [e.entry_type for e in await self.repository.read_all(session)]

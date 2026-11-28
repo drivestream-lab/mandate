@@ -20,12 +20,13 @@ from src.engine.gates.voiding_rules import (
     attested_upstream_heads,
     changed_upstreams,
     heads_newest_first,
-    latest_time,
     recorded_no_failure_reason,
     revised_cause,
     revised_label,
     revised_role,
-    signoff_follows_void,
+    review_evidence,
+    approves_on_head,
+    stale_approves_on_head,
     stale_cause,
     stale_failure_reason,
     stale_label,
@@ -33,7 +34,6 @@ from src.engine.gates.voiding_rules import (
     earlier_approves,
     unresolved_no,
     upstream_evidence,
-    void_failure_reason,
 )
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
@@ -85,13 +85,14 @@ class SignoffVoidingService(BaseBusinessService):
             )
             if recorded != SIGNOFF_CHOICE:
                 continue
+            review_ids = approves_on_head(snapshot, earlier.head_sha)
             await self._record(
                 rule,
                 revised_role(rule),
                 earlier.head_sha,
-                revised_cause(earlier, snapshot.head_sha),
+                revised_cause(review_ids, snapshot.head_sha),
                 (f"{earlier.reviewer}'s recorded signoff on {earlier.head_sha} no longer holds",),
-                (),
+                review_evidence(review_ids),
                 stamp,
             )
             await self._label(github, snapshot, revised_label(rule))
@@ -119,30 +120,14 @@ class SignoffVoidingService(BaseBusinessService):
             rule,
             stale_role(rule),
             snapshot.head_sha,
-            stale_cause(changed, signoff.signed_at),
+            stale_cause(changed, signoff.review_id),
             (f"an upstream change after {signoff.signer} reviewed against it",),
-            upstream_evidence(changed),
+            review_evidence(stale_approves_on_head(snapshot, upstream_now))
+            + upstream_evidence(changed),
             stamp,
         )
         await self._label(github, snapshot, stale_label(rule))
         return stale_failure_reason(stale_label(rule))
-
-    async def void_failure(
-        self, snapshot: PullRequestSnapshot, signoff: SignoffReading, rule: GateRule
-    ) -> str | None:
-        """The reason a void on this head still stands, or None.
-
-        A head carrying a revised or stale void needs a signoff given after the void, even when
-        the head is a commit that was signed before.
-        """
-        head = snapshot.head_sha
-        times: list[datetime | None] = []
-        for role in (revised_role(rule), stale_role(rule)):
-            record = await self._ledger.latest_decision_record(MANDATE_ACTOR, role, head)
-            times.append(None if record is None else record.decided_at)
-        if signoff_follows_void(signoff.signed_at, latest_time(times)):
-            return None
-        return void_failure_reason(revised_label(rule))
 
     async def clear_labels(
         self, github: LabelClient, snapshot: PullRequestSnapshot, rule: GateRule

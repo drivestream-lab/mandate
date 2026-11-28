@@ -135,12 +135,12 @@ class NonMergeDecisionService(BaseBusinessService):
         rung: RungType,
         decided_at: datetime,
         stamp: VersionStamp,
-        gate_id: UUID | None = None,
+        gate_id: UUID,
     ) -> StoredLedgerEntry | None:
         """Write the holder's decision with their identity, once; None when already there.
 
-        With the decision's `gate_id` it is recorded under that decision's own role, so a recorded
-        no belongs to that decision and its holder alone.
+        It is recorded under the role of the decision's own gate, so a recorded no belongs to that
+        decision and its holder alone.
         """
         if read.option_id not in {option.option_id for option in brief.options}:
             raise DecisionNotOfferedError(read.option_id)

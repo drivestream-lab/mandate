@@ -49,6 +49,7 @@ def _review(
         commit_id=commit,
         body=_body(commit) if body is None else body,
         submitted_at=at,
+        edited=False,
     )
 
 
