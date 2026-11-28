@@ -17,15 +17,22 @@ class OutboxRepository:
     """Data access for outbox.messages."""
 
     async def enqueue(
-        self, session: AsyncSession, message: NewOutboxMessage, key: IdempotencyKey
+        self,
+        session: AsyncSession,
+        message: NewOutboxMessage,
+        key: IdempotencyKey,
+        now: datetime,
     ) -> bool:
-        """Add a message; False when one with the same key is already there (nothing changes)."""
+        """Add a message due at now; False when one with the same key is already there."""
         result = await session.execute(
             postgres_insert(_MESSAGES)
             .values(
                 destination=message.destination,
                 payload=message.payload,
                 idempotency_key=key.value,
+                next_attempt_at=now,
+                created_at=now,
+                updated_at=now,
             )
             .on_conflict_do_nothing(index_elements=["idempotency_key"])
             .returning(_MESSAGES.c.id)

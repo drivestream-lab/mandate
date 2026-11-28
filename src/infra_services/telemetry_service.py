@@ -3,7 +3,9 @@
 # The two OpenTelemetry instrumentation packages below ship no type stubs.
 # pyright: reportMissingTypeStubs=false
 
+import socket
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from injector import inject
@@ -36,6 +38,43 @@ from src.logging import get_logger
 from src.models.telemetry_types import TracesSamplerType
 
 logger = get_logger()
+
+
+def collector_address(endpoint: str) -> Optional[tuple[str, int]]:
+    """Host and port of an OTLP http endpoint, or None when it is empty or cannot be parsed."""
+    try:
+        parsed = urlparse(endpoint.strip())
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    return host, port or (443 if parsed.scheme == "https" else 4318)
+
+
+def check_collector(endpoint: str, timeout: float = 2.0) -> bool:
+    """Log one warning when telemetry cannot be exported; return True when it can.
+
+    Telemetry is not on the gate path, so the service starts either way. Only the host and
+    port are logged: the endpoint may carry credentials.
+    """
+    address = collector_address(endpoint)
+    if address is None:
+        logger.warning(
+            "Telemetry export is off: OTEL_EXPORTER_OTLP_ENDPOINT is empty or not a valid URL"
+        )
+        return False
+    try:
+        with socket.create_connection(address, timeout=timeout):
+            return True
+    except (OSError, ValueError) as error:
+        logger.warning(
+            "Telemetry collector is unreachable; the service runs without exported telemetry",
+            host=address[0],
+            port=address[1],
+            error=str(error),
+        )
+        return False
 
 
 class TelemetryService(BaseInfraService):
@@ -90,6 +129,10 @@ class TelemetryService(BaseInfraService):
         self._meter_provider = meter_provider
         self._initialized = True
         logger.info("TelemetryService initialized")
+
+    def warn_if_collector_unreachable(self) -> bool:
+        """Check the configured collector once; see check_collector."""
+        return check_collector(self._settings.exporter_otlp_endpoint)
 
     async def close(self) -> None:
         """Shutdown telemetry providers and remove instrumentation."""

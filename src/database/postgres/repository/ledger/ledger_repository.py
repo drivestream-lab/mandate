@@ -15,7 +15,7 @@ from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
-from sqlalchemy import insert, select, text
+from sqlalchemy import and_, insert, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database.postgres.schema.ledger.ledger_entry_schema import LedgerEntrySchema
@@ -93,6 +93,64 @@ class LedgerRepository:
         )
         row = result.first()
         return None if row is None else _to_stored(row)
+
+    async def find_latest_decision(
+        self, session: AsyncSession, actor: str, role: str, target_version: str
+    ) -> StoredLedgerEntry | None:
+        """The latest decision, or correction of one, by this actor in this role on this version."""
+        content = _ENTRIES.c.payload["content"]
+        corrected = content["corrected_decision"]
+        result = await session.execute(
+            select(_ENTRIES)
+            .where(
+                or_(
+                    and_(
+                        _ENTRIES.c.entry_type == "decision",
+                        content["actor"].astext == actor,
+                        content["role"].astext == role,
+                        content["target_version"].astext == target_version,
+                    ),
+                    and_(
+                        _ENTRIES.c.entry_type == "correction",
+                        corrected["actor"].astext == actor,
+                        corrected["role"].astext == role,
+                        corrected["target_version"].astext == target_version,
+                    ),
+                )
+            )
+            .order_by(_ENTRIES.c.sequence.desc())
+            .limit(1)
+        )
+        row = result.first()
+        return None if row is None else _to_stored(row)
+
+    async def find_decisions(
+        self, session: AsyncSession, actor: str, role: str, target_version: str
+    ) -> list[StoredLedgerEntry]:
+        """Every decision, and correction of one, by this actor in this role on this version, oldest first."""
+        content = _ENTRIES.c.payload["content"]
+        corrected = content["corrected_decision"]
+        result = await session.execute(
+            select(_ENTRIES)
+            .where(
+                or_(
+                    and_(
+                        _ENTRIES.c.entry_type == "decision",
+                        content["actor"].astext == actor,
+                        content["role"].astext == role,
+                        content["target_version"].astext == target_version,
+                    ),
+                    and_(
+                        _ENTRIES.c.entry_type == "correction",
+                        corrected["actor"].astext == actor,
+                        corrected["role"].astext == role,
+                        corrected["target_version"].astext == target_version,
+                    ),
+                )
+            )
+            .order_by(_ENTRIES.c.sequence)
+        )
+        return [_to_stored(row) for row in result.all()]
 
     async def read_all(self, session: AsyncSession) -> list[StoredLedgerEntry]:
         """Every entry in sequence order."""

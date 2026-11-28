@@ -54,6 +54,15 @@ services:
       - ./deploy-secrets:/in:ro
       - database-secrets:/out
 
+  # Receives the service's OTLP traces and metrics and writes them to its own logs (debug
+  # exporter) until a real backend exists. The image has no shell, so no healthcheck; the
+  # service starts without it and warns once when it cannot reach it.
+  otel-collector:
+    image: otel/opentelemetry-collector:0.116.1
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+
   mandate:
     build:
       context: ..
@@ -79,6 +88,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       APP_PORT: "8000"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       # The image holds no test files; the deploy stack mounts the public test key.
       JWT_PUBLIC_KEY_PATH: /app/config/jwt_public.pem
     volumes:
@@ -96,6 +106,8 @@ services:
         condition: service_healthy
       database-secrets:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 3s

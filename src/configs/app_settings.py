@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import ClassVar
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from src.configs.base_settings import BaseSettings
 
@@ -28,6 +28,11 @@ class AppSettings(BaseSettings):
     log_format: str = Field(default="text", description="'json' in production, 'text' locally")
     log_to_console: bool = Field(default=True)
     log_dir: str = Field(default="logs")
+    reload: bool = Field(
+        default=False,
+        description="Restart on code changes (local development only; never set in a deployed image)",
+    )
+    workers: int = Field(default=1, ge=1, description="Server worker processes")
 
     @field_validator("log_format")
     @classmethod
@@ -45,6 +50,12 @@ class AppSettings(BaseSettings):
         if v_upper not in valid:
             raise ValueError(f"Log level must be one of {valid}")
         return v_upper
+
+    @model_validator(mode="after")
+    def validate_reload_workers(self) -> "AppSettings":
+        if self.reload and self.workers > 1:
+            raise ValueError("APP_RELOAD needs APP_WORKERS=1")
+        return self
 
     @property
     def is_development(self) -> bool:

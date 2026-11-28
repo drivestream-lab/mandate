@@ -1,5 +1,6 @@
 """FastAPI application setup for mandate."""
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
     with LoggingContext(startup_correlation_id):
         logger.info("Starting mandate application")
         container = configure_container()
+        await asyncio.to_thread(container.get(TelemetryService).warn_if_collector_unreachable)
         app.state.container = container
         try:
             await initialize_all_services()

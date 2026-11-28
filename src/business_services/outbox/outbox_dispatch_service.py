@@ -63,7 +63,7 @@ class OutboxDispatchService(BaseBusinessService):
         key = derive_idempotency_key(
             message.work_item_id, f"outbox:{message.destination}:{message.step}"
         )
-        return await self._repository.enqueue(session, message, key)
+        return await self._repository.enqueue(session, message, key, utc_now(self._clock))
 
     async def dispatch_due(self, limit: int = 100) -> OutboxDispatchReport:
         """Deliver every due message, up to the limit, and schedule the failures for a retry."""
