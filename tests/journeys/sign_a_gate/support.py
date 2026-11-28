@@ -45,6 +45,18 @@ class Services:
         self.repository = repository
         self.postgres = postgres
 
+    async def signoffs_recorded(self, gate_label: str) -> int:
+        """How many signoff decisions the ledger holds for this gate (not its other records)."""
+        async with self.postgres.get_session() as session:
+            entries = await self.repository.read_all(session)
+        return len(
+            [
+                e
+                for e in entries
+                if e.entry_type == "decision" and e.payload.get("role") == gate_label
+            ]
+        )
+
     async def entry_types(self) -> list[str]:
         async with self.postgres.get_session() as session:
             return [e.entry_type for e in await self.repository.read_all(session)]
