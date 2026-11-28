@@ -28,7 +28,6 @@ from src.engine.gates.voiding_rules import (
     revised_role,
     stale_role,
     voided_review_ids,
-    without_reviews,
 )
 from src.models.gate_models import PullRequestRef
 from src.models.kernel_models import VersionStamp
@@ -65,8 +64,9 @@ class SignoffService(BaseBusinessService):
     ) -> tuple[PullRequestSnapshot, SignoffAssessment]:
         """The pull request as it is now, and its signoff on that head or why there is none.
 
-        Approves that a void on this head names are left out, so a signoff is looked for among
-        the Approves no void names.
+        Each reviewer's standing review is chosen first. One that a void names, or whose body was
+        ever edited, leaves that reviewer with no signoff: an older review is never reached behind
+        it.
         """
         snapshot = await reader.read_pull_request(ref)
         voided: set[int] = set()
@@ -76,7 +76,7 @@ class SignoffService(BaseBusinessService):
             ):
                 voided |= voided_review_ids(record.evidence)
         edited = {review.review_id for review in snapshot.reviews if review.edited}
-        assessment = assess_signoff(without_reviews(snapshot, frozenset(voided | edited)), rule)
+        assessment = assess_signoff(snapshot, rule, frozenset(voided | edited))
         if assessment.signoff is not None:
             return snapshot, assessment
         if edited_approves(snapshot, rule):
@@ -119,17 +119,6 @@ class SignoffService(BaseBusinessService):
         """
         key = attestation_key(signoff.head_sha, signoff.review_id)
         if await self._ledger.latest_choice(MANDATE_ACTOR, attestation_edited_role(rule), key):
-            return EDITED_FAILURE_REASON
-        if signoff.edited:
-            await self._write(
-                signoff.review_id,
-                signoff.body_digest,
-                rule,
-                attestation_edited_role(rule),
-                key,
-                "edited",
-                stamp,
-            )
             return EDITED_FAILURE_REASON
         pinned = await self._ledger.latest_decision_record(
             MANDATE_ACTOR, attestation_role(rule), key

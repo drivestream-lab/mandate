@@ -122,19 +122,6 @@ def stale_approves_on_head(
     return tuple(sorted(ids))
 
 
-def without_reviews(
-    snapshot: PullRequestSnapshot, review_ids: frozenset[int]
-) -> PullRequestSnapshot:
-    """The pull request as read, minus the reviews a void names."""
-    return snapshot.model_copy(
-        update={
-            "reviews": tuple(
-                review for review in snapshot.reviews if review.review_id not in review_ids
-            )
-        }
-    )
-
-
 def edited_approves(snapshot: PullRequestSnapshot, rule: GateRule) -> tuple[PullReview, ...]:
     """The holders' Approves on the current head whose body was ever edited."""
     return tuple(

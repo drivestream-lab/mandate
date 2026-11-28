@@ -146,7 +146,6 @@ class SignoffReading(BaseModel):
     label: str
     head_sha: str
     review_id: int
-    edited: bool
     body_digest: str = Field(pattern=r"^[0-9a-f]{64}$", description="SHA-256 of the Approve body")
     signed_at: datetime
     attestation: Attestation

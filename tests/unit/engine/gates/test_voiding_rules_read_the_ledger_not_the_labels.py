@@ -22,7 +22,6 @@ from src.engine.gates.voiding_rules import (
     attestation_evidence,
     body_digest,
     pinned_digest,
-    without_reviews,
     revised_role,
     signoff_is_voided,
     stale_role,
@@ -31,6 +30,7 @@ from src.engine.gates.voiding_rules import (
     stale_label,
     unresolved_no,
 )
+from src.engine.gates.signoff_rules import assess_signoff
 from src.models.gate_models import GateClassType, PullRequestRef
 from src.models.ledger_models import RungType
 from src.models.signoff_models import (
@@ -183,8 +183,6 @@ def test_a_void_names_every_approve_on_the_head_by_any_reviewer() -> None:
         )
     )
     assert approves_on_head(snapshot, _HEAD_A) == (1, 2)
-    left = without_reviews(snapshot, frozenset({1, 2}))
-    assert [review.review_id for review in left.reviews] == [3, 4]
 
 
 @pytest.mark.req("REQ-40")
@@ -236,3 +234,37 @@ def test_a_stale_void_names_only_approves_not_given_against_the_current_upstream
     now = [UpstreamHead(upstream=_UPSTREAM, head_sha=_HEAD_B)]
     # 1 attests the old head, 2 the current one, 3 is not a readable attestation.
     assert stale_approves_on_head(snapshot, now) == (1, 3)
+
+
+def _holder_rule() -> GateRule:
+    return GateRule(
+        label="spec-lgtm", branch="develop", rung=RungType.L2, holders=frozenset({"holder"})
+    )
+
+
+def _signed_body() -> str:
+    return (
+        f"attestation:\n  initiative: I\n  head: {_HEAD_A}\n  gate: spec-lgtm\n  repo: r\n"
+        f"  pull_request: 1\n  digests: ['{'c' * 64}']\n  artifact_paths: [p]\n"
+    )
+
+
+@pytest.mark.req("REQ-40")
+@pytest.mark.parametrize("later", [ReviewStateType.CHANGES_REQUESTED, ReviewStateType.DISMISSED])
+def test_an_edited_later_review_leaves_no_signoff_and_never_reaches_the_older_approve(
+    later: ReviewStateType,
+) -> None:
+    approve = _review(1, "holder", _HEAD_A, ReviewStateType.APPROVED).model_copy(
+        update={"body": _signed_body()}
+    )
+    verdict = _review(2, "holder", _HEAD_A, later).model_copy(update={"edited": True})
+    snapshot = _snapshot((approve, verdict))
+    assert assess_signoff(snapshot, _holder_rule()).signoff is None
+    assert assess_signoff(snapshot, _holder_rule(), frozenset({2})).signoff is None
+    # With nothing later, the Approve stands.
+    assert assess_signoff(_snapshot((approve,)), _holder_rule()).signoff is not None
+    # The excluded review is the standing one, so the older Approve is not reached.
+    assert (
+        assess_signoff(_snapshot((approve, verdict)), _holder_rule(), frozenset({1})).signoff
+        is None
+    )
