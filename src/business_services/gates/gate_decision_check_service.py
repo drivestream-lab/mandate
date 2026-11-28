@@ -24,10 +24,12 @@ from src.business_services.base_business_service import BaseBusinessService
 from src.business_services.gates.signoff_service import PullRequestReader, SignoffService
 from src.engine.gates.gate_decision_rules import (
     failure_after_fault,
-    no_gate_label,
+    ambiguous_gate,
+    choose_rule,
+    more_than_one_gate_label,
+    not_recorded_for_recheck,
     outcome_after_recording,
     refusal_for,
-    rule_for,
     sharing_pulls,
     withdrawal_after_fault,
     withdrawal_for,
@@ -81,16 +83,36 @@ class GateDecisionCheckService(BaseBusinessService):
         self._signoffs = signoffs
 
     async def evaluate_and_post(
-        self, github: GitHubGateClient, ref: PullRequestRef, rule: GateRule, stamp: VersionStamp
+        self,
+        github: GitHubGateClient,
+        ref: PullRequestRef,
+        rule: GateRule,
+        stamp: VersionStamp,
+        all_rules: Sequence[GateRule] = (),
     ) -> GateDecisionOutcome:
-        """Decide pass or fail by the rule, record the signoff, post on the head."""
+        """Decide pass or fail by the rule, record the signoff, post on the head.
+
+        `all_rules` are the gates configured for the repo; a pull request that carries the
+        labels of two gates of its branch fails.
+        """
+        return await self._evaluate(github, ref, rule, stamp, all_rules or (rule,), True)
+
+    async def _evaluate(
+        self,
+        github: GitHubGateClient,
+        ref: PullRequestRef,
+        rule: GateRule,
+        stamp: VersionStamp,
+        all_rules: Sequence[GateRule],
+        may_record: bool,
+    ) -> GateDecisionOutcome:
         try:
             head = await github.read_head_sha(ref)
         except Exception as error:
             logger.error("pull request unreadable", repo=ref.repo, number=ref.number)
             raise GateUnreadableError(ref) from error
         try:
-            outcome = await self._decide(github, ref, rule, stamp)
+            outcome = await self._decide(github, ref, rule, stamp, all_rules, may_record)
         except Exception as error:  # any fault once the head is known fails the check
             return await self._post(github, ref, failure_after_fault(head, type(error).__name__))
         posted = await self._post(github, ref, outcome)
@@ -139,16 +161,16 @@ class GateDecisionCheckService(BaseBusinessService):
         outcomes: list[GateDecisionOutcome],
         escalations: list[EscalationNote],
     ) -> None:
-        rule = rule_for(pull, rules)
+        chosen = choose_rule(pull, rules)
         try:
-            if rule is None:
-                outcome = no_gate_label(pull.head_sha, pull, rules)
+            if isinstance(chosen, GateDecisionOutcome):
                 await github.post_gate_decision(
-                    pull.ref.repo, pull.head_sha, outcome.state, outcome.reason
+                    pull.ref.repo, pull.head_sha, chosen.state, chosen.reason
                 )
-                outcomes.append(outcome)
+                outcomes.append(chosen)
             else:
-                outcomes.append(await self.evaluate_and_post(github, pull.ref, rule, stamp))
+                # The re-check only downgrades or re-confirms: it never records a decision.
+                outcomes.append(await self._evaluate(github, pull.ref, chosen, stamp, rules, False))
         except Exception as error:  # includes GateUnreadableError: a person must look
             note = EscalationNote(
                 repo=pull.ref.repo,
@@ -161,10 +183,18 @@ class GateDecisionCheckService(BaseBusinessService):
             escalations.append(note)
 
     async def _decide(
-        self, github: GitHubGateClient, ref: PullRequestRef, rule: GateRule, stamp: VersionStamp
+        self,
+        github: GitHubGateClient,
+        ref: PullRequestRef,
+        rule: GateRule,
+        stamp: VersionStamp,
+        all_rules: Sequence[GateRule],
+        may_record: bool,
     ) -> GateDecisionOutcome:
         snapshot, assessment = await self._signoffs.read_signoff(github, ref, rule)
         head = snapshot.head_sha
+        if more_than_one_gate_label(snapshot.labels, snapshot.base_ref, all_rules):
+            return ambiguous_gate(head)
         candidates: list[OpenPull] = []
         for branch in sorted(GOVERNED_BRANCHES):
             candidates += await github.list_open_pulls(ref.repo, branch)
@@ -172,7 +202,10 @@ class GateDecisionCheckService(BaseBusinessService):
         signoff = assessment.signoff
         if refusal is not None or signoff is None:
             return refusal or failure_after_fault(head, "NoSignoff")
-        await self._signoffs.record_signoff(signoff, rule, stamp)
+        if may_record:
+            await self._signoffs.record_signoff(signoff, rule, stamp)
+        elif not await self._signoffs.is_recorded(signoff, rule):
+            return not_recorded_for_recheck(head, rule)
         recorded = await self._signoffs.is_recorded(signoff, rule)
         return outcome_after_recording(head, rule, signoff, recorded)
 

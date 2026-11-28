@@ -33,6 +33,9 @@ logger = get_logger()
 
 _TOKEN_REUSE_SECONDS = 50 * 60
 _STATUS_DESCRIPTION_LIMIT = 140
+_READ_ATTEMPTS = 3
+"""Reads and the check status (same state, same effect) are repeated after a dropped
+connection or a 5xx; comments and reviews never are."""
 
 
 class GitHubError(Exception):
@@ -189,7 +192,7 @@ class GitHubAppService(BaseInfraService):
             "context": GATE_DECISION_CONTEXT,
             "description": description[:_STATUS_DESCRIPTION_LIMIT],
         }
-        await self._post(path, body)
+        await self._post(path, body, repeatable=True)
 
     async def post_brief(self, pull_request: PullRequestRef, body: str) -> None:
         """Post a gate's brief as a comment on its pull request."""
@@ -227,23 +230,42 @@ class GitHubAppService(BaseInfraService):
         return self._token
 
     async def _get(self, path: str, params: dict[str, int | str] | None = None) -> httpx.Response:
-        try:
-            response = await self._ready().get(
-                path, params=params, headers=_headers(await self._token_for_calls())
-            )
-        except httpx.HTTPError as error:
-            raise GitHubError(f"GitHub could not be reached for {path}") from error
+        response = await self._send("GET", path, params, None, True)
         self._raise_for_status(response, path)
         return response
 
-    async def _post(self, path: str, body: dict[str, str]) -> None:
-        try:
-            response = await self._ready().post(
-                path, json=body, headers=_headers(await self._token_for_calls())
-            )
-        except httpx.HTTPError as error:
-            raise GitHubError(f"GitHub could not be reached for {path}") from error
-        self._raise_for_status(response, path)
+    async def _post(self, path: str, body: dict[str, str], repeatable: bool = False) -> None:
+        self._raise_for_status(await self._send("POST", path, None, body, repeatable), path)
+
+    async def _send(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, int | str] | None,
+        body: dict[str, str] | None,
+        repeatable: bool,
+    ) -> httpx.Response:
+        """One call; a repeatable one is tried again after a dropped connection or a 5xx."""
+        attempts = _READ_ATTEMPTS if repeatable else 1
+        error: httpx.HTTPError | None = None
+        response: httpx.Response | None = None
+        for _ in range(attempts):
+            try:
+                response = await self._ready().request(
+                    method,
+                    path,
+                    params=params,
+                    json=body,
+                    headers=_headers(await self._token_for_calls()),
+                )
+            except httpx.TransportError as caught:
+                error, response = caught, None
+                continue
+            if response.status_code < 500:
+                return response
+        if response is not None:
+            return response
+        raise GitHubError(f"GitHub could not be reached for {path}") from error
 
     def _ready(self) -> httpx.AsyncClient:
         if self._client is None:

@@ -37,12 +37,43 @@ def sharing_pulls(
     )
 
 
-def rule_for(pull: OpenPull, rules: Sequence[GateRule]) -> GateRule | None:
-    """The gate a pull request signs: the rule for its branch whose label it carries."""
+MORE_THAN_ONE_GATE_LABEL = "more than one gate label"
+
+
+def gate_labels_present(
+    labels: Sequence[str], base_ref: str, rules: Sequence[GateRule]
+) -> list[str]:
+    """The gate labels of this branch that are on the pull request."""
+    return sorted(
+        {rule.label for rule in rules if rule.branch == base_ref and rule.label in labels}
+    )
+
+
+def more_than_one_gate_label(
+    labels: Sequence[str], base_ref: str, rules: Sequence[GateRule]
+) -> bool:
+    """True when the pull request carries the labels of two gates of its branch."""
+    return len(gate_labels_present(labels, base_ref, rules)) > 1
+
+
+def ambiguous_gate(head_sha: str) -> GateDecisionOutcome:
+    """Failure for a pull request whose gate cannot be told: it names more than one."""
+    return failure(head_sha, f"{MORE_THAN_ONE_GATE_LABEL} is on the pull request")
+
+
+def choose_rule(pull: OpenPull, rules: Sequence[GateRule]) -> GateRule | GateDecisionOutcome:
+    """The gate a pull request names by its label, or the failure to post.
+
+    None of the branch's gate labels, or more than one, is a failure: a label never picks a
+    gate when it is not the only one.
+    """
+    present = gate_labels_present(pull.labels, pull.base_ref, rules)
+    if len(present) > 1:
+        return ambiguous_gate(pull.head_sha)
     for rule in rules:
-        if rule.branch == pull.base_ref and rule.label in pull.labels:
+        if rule.branch == pull.base_ref and rule.label in present:
             return rule
-    return None
+    return no_gate_label(pull.head_sha, pull, rules)
 
 
 def no_gate_label(head_sha: str, pull: OpenPull, rules: Sequence[GateRule]) -> GateDecisionOutcome:
@@ -50,6 +81,15 @@ def no_gate_label(head_sha: str, pull: OpenPull, rules: Sequence[GateRule]) -> G
     labels = sorted(rule.label for rule in rules if rule.branch == pull.base_ref)
     named = ", ".join(labels) if labels else f"no gate is configured for {pull.base_ref}"
     return failure(head_sha, f"none of the gate labels ({named}) is on the pull request")
+
+
+def not_recorded_for_recheck(head_sha: str, rule: GateRule) -> GateDecisionOutcome:
+    """Failure when the re-check finds no recorded decision for this gate on this head."""
+    return failure(
+        head_sha,
+        f"the ledger holds no decision for gate {rule.label} on this head; "
+        "only the event check records one",
+    )
 
 
 def failure(head_sha: str, reason: str) -> GateDecisionOutcome:

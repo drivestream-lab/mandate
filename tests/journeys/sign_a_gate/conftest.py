@@ -50,6 +50,10 @@ GATE_RULE = GateRule(
 )
 """The test gate configuration: the sandbox gates are at L2, so the deciding role, here the
 challenger App, signs and may be an App."""
+DESIGN_GATE_RULE = GateRule(
+    label="design-lgtm", branch="develop", rung=RungType.L2, holders=frozenset({SIGNER_LOGIN})
+)
+"""A second gate of the same branch, to show a pull request naming two gates fails."""
 L0_GATE_RULE = GateRule(
     label=GATE_LABEL, branch="develop", rung=RungType.L0, holders=frozenset({SIGNER_LOGIN})
 )
@@ -156,9 +160,16 @@ class SandboxPullRequest:
         raise TimeoutError("the pull request did not move to the pushed commit")
 
     def signer_labels(self) -> None:
-        with _client(self._signer) as client:
+        self.add_label(self._signer, GATE_LABEL)
+
+    def author_adds_label(self, label: str) -> None:
+        """The author picks another gate label for the same pull request."""
+        self.add_label(self._author, label)
+
+    def add_label(self, token: str, label: str) -> None:
+        with _client(token) as client:
             client.post(
-                f"/issues/{self.ref.number}/labels", json={"labels": [GATE_LABEL]}
+                f"/issues/{self.ref.number}/labels", json={"labels": [label]}
             ).raise_for_status()
 
     def review(self, token: str, event: str, body: str) -> None:

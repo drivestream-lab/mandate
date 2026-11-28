@@ -12,10 +12,12 @@ from src.engine.gates.gate_decision_rules import (
     PAGE_SIZE,
     failure_after_fault,
     next_page,
-    no_gate_label,
+    not_recorded_for_recheck,
     outcome_after_recording,
     refusal_for,
-    rule_for,
+    choose_rule,
+    more_than_one_gate_label,
+    MORE_THAN_ONE_GATE_LABEL,
     sharing_pulls,
     withdrawal_after_fault,
     withdrawal_for,
@@ -123,10 +125,28 @@ def test_a_list_longer_than_a_page_is_read_to_its_end_and_finds_the_sharing_pull
     assert next_page(1, PAGE_SIZE - 1) is None
 
 
+_DESIGN = GateRule(
+    label="design-lgtm", branch="develop", rung=RungType.L2, holders=frozenset({"x"})
+)
+
+
 @pytest.mark.req("REQ-63")
-def test_a_pull_request_takes_the_rule_of_its_branch_and_label_or_fails_naming_the_labels() -> None:
-    assert rule_for(_pull(1, labels=("spec-lgtm",)), [_RULE]) == _RULE
-    assert rule_for(_pull(1, base="main", labels=("spec-lgtm",)), [_RULE]) is None
-    assert rule_for(_pull(1), [_RULE]) is None
-    outcome = no_gate_label(_HEAD, _pull(1), [_RULE])
+def test_a_pull_request_names_its_gate_only_by_exactly_one_label_of_its_branch() -> None:
+    rules = [_RULE, _DESIGN]
+    assert choose_rule(_pull(1, labels=("spec-lgtm",)), rules) == _RULE
+    assert choose_rule(_pull(1, labels=("design-lgtm", "unrelated")), rules) == _DESIGN
+    none = choose_rule(_pull(1), rules)
+    assert not isinstance(none, GateRule) and "none of the gate labels" in none.reason
+    other_branch = choose_rule(_pull(1, base="main", labels=("spec-lgtm",)), rules)
+    assert not isinstance(other_branch, GateRule)
+    two = choose_rule(_pull(1, labels=("spec-lgtm", "design-lgtm")), rules)
+    assert not isinstance(two, GateRule)
+    assert two.state is GateDecisionStateType.FAILURE and MORE_THAN_ONE_GATE_LABEL in two.reason
+    assert more_than_one_gate_label(("spec-lgtm", "design-lgtm"), "develop", rules)
+    assert not more_than_one_gate_label(("spec-lgtm", "design-lgtm"), "main", rules)
+
+
+@pytest.mark.req("REQ-63")
+def test_the_recheck_fails_a_gate_with_no_recorded_decision() -> None:
+    outcome = not_recorded_for_recheck(_HEAD, _RULE)
     assert outcome.state is GateDecisionStateType.FAILURE and "spec-lgtm" in outcome.reason
