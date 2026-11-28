@@ -125,13 +125,14 @@ class MergeService(BaseBusinessService):
                 state=MergeStateType.NOT_SIGNED,
                 reason=attestation if isinstance(attestation, str) else "no decision",
             )
-        voided = void_after_decision(
-            record,
-            [
-                await self._ledger.latest_decision_record(MANDATE_ACTOR, role, snapshot.head_sha)
-                for role in (revised_role(rule), stale_role(rule))
-            ],
+        decided_at = await self._ledger.latest_decision_sequence(
+            rule.deciding_role, merge_decision_role(rule, ref), snapshot.head_sha
         )
+        voids = [
+            await self._ledger.latest_decision_sequence(MANDATE_ACTOR, role, snapshot.head_sha)
+            for role in (revised_role(rule), stale_role(rule))
+        ]
+        voided = void_after_decision(decided_at, voids) if decided_at is not None else "no decision"
         if voided is not None:
             return MergeOutcome(state=MergeStateType.NOT_SIGNED, reason=voided)
         problem = signoff_problem(snapshot, rule, attestation)

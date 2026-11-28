@@ -3,7 +3,7 @@ check, and gate rulesets or branch protection that are not what a decided Launch
 
 Landings. Each of develop and main is walked from its current tip back through first parents
 to the tip the previous sweep recorded in the ledger (the checkpoint, written by Mandate); the
-first sweep has none and goes back as far as `max_depth` landings; once there is one, the walk goes all the way to it. Commit dates are never used.
+first sweep has none and goes back as far as `max_depth` landings; once there is one, GitHub's compare bounds the walk: identical judges nothing, ahead walks at most ahead_by first parents to the checkpoint, and behind or diverged (a rewrite) is recorded and escalated at once and the landings above the merge base are judged all the same. A comparison that fails judges nothing and moves nothing. Commit dates are never used.
 A landing that is a merged pull request's merge commit is judged on the head that was merged: the
 newest mandate/gate-decision at or before GitHub's merge time must be a success posted by
 Mandate's App. A landing that is not (a push, or a rebase merge) is a breach whatever statuses it
@@ -46,6 +46,7 @@ from src.engine.gates.unguarded_merge_rules import (
     governance_findings,
     judge_merge,
     protection_digest,
+    plan_walk,
     revert_due,
     seed_allowed,
     ruleset_digest,
@@ -57,6 +58,7 @@ from src.models.signoff_models import GOVERNED_BRANCHES, MANDATE_ACTOR
 from src.models.sweep_models import (
     BranchCommit,
     BreachKindType,
+    CompareResult,
     GovernanceFinding,
     HeadStatus,
     MergeObservation,
@@ -86,6 +88,8 @@ class SweepGitHub(Protocol):
     async def read_branch_tip(self, repo: str, branch: str) -> str: ...
 
     async def read_commit(self, repo: str, sha: str) -> BranchCommit: ...
+
+    async def compare(self, repo: str, base: str, head: str) -> CompareResult: ...
 
     async def merged_pulls_with_commits(
         self, repo: str, branch: str, shas: frozenset[str]
@@ -181,27 +185,59 @@ class UnguardedMergeSweepService(BaseBusinessService):
             checkpoint = await self._ledger.latest_choice(
                 MANDATE_ACTOR, CHECKPOINT_ROLE, _checkpoint_target(repo, branch)
             )
-            line, stopped = await self._first_parent_line(
-                github, repo, tip, checkpoint, config.max_depth
-            )
         except Exception as error:  # a branch that cannot be read is for the owner to see
             self._escalate(found, repo, subject, f"could not be read ({type(error).__name__})")
             return
-        landed = [commit.sha for commit in line]
+        stop_at: str | None = None
+        limit = config.max_depth
+        rewritten = False
+        if checkpoint is not None:
+            # How far the tip is from the checkpoint is GitHub's answer, not a guess: it bounds
+            # the walk. An answer that cannot be had or understood judges nothing.
+            try:
+                plan = plan_walk(await github.compare(repo, checkpoint, tip), checkpoint)
+            except Exception as error:
+                self._escalate(
+                    found, repo, subject, f"could not be compared ({type(error).__name__})"
+                )
+                return
+            if plan is None:
+                self._escalate(
+                    found, repo, subject, "the comparison with the checkpoint is unknown"
+                )
+                return
+            if plan.nothing_to_judge:
+                return
+            stop_at, limit, rewritten = plan.stop_at, plan.limit, plan.rewritten
         complete = True
-        if not checkpoint_reached(stopped, checkpoint):
-            # The branch's own line does not lead to the checkpoint: it was rewritten. Record and
-            # escalate it; the walk's landings are not the branch's history, and the checkpoint
-            # stays where it is until the owner has dealt with it.
-            await self._record_unrevertable(
+        if rewritten:
+            # Recorded and escalated at once; the landings above the merge base are still judged.
+            complete = await self._record_unrevertable(
                 found,
                 repo,
                 f"{branch} rewritten@{tip[:12]}",
                 BreachKindType.REWRITTEN_BRANCH,
-                f"{branch} no longer leads to the checkpoint {checkpoint}: it was rewritten",
+                f"{branch} no longer descends from the checkpoint {checkpoint}: it was rewritten",
                 stamp,
             )
+        try:
+            line, stopped = await self._first_parent_line(github, repo, tip, stop_at, limit)
+        except Exception as error:
+            self._escalate(found, repo, subject, f"could not be read ({type(error).__name__})")
             return
+        landed = [commit.sha for commit in line]
+        if checkpoint is not None and not checkpoint_reached(stopped, stop_at):
+            # Ahead of the checkpoint but not along the branch's own line: not a history to judge
+            # as ordinary landings. Recorded; the checkpoint does not move.
+            await self._record_unrevertable(
+                found,
+                repo,
+                f"{branch} line broken@{tip[:12]}",
+                BreachKindType.REWRITTEN_BRANCH,
+                f"{branch} first-parent line does not lead to {stop_at}",
+                stamp,
+            )
+            complete = False
         try:
             pulls = {
                 pull.merge_commit_sha: pull
@@ -243,13 +279,13 @@ class UnguardedMergeSweepService(BaseBusinessService):
                 )
 
     async def _first_parent_line(
-        self, github: SweepGitHub, repo: str, tip: str, checkpoint: str | None, max_depth: int
+        self, github: SweepGitHub, repo: str, tip: str, stop_at: str | None, limit: int
     ) -> tuple[list[BranchCommit], str | None]:
-        """The landings from the tip back to, not including, the checkpoint (or the depth), and
-        the commit the walk stopped on."""
+        """The landings from the tip back to, not including, `stop_at` (or the limit), and the
+        commit the walk stopped on."""
         line: list[BranchCommit] = []
         current: str | None = tip
-        while current is not None and not walk_complete(current, checkpoint, len(line), max_depth):
+        while current is not None and not walk_complete(current, stop_at, len(line), limit):
             commit = await github.read_commit(repo, current)
             line.append(commit)
             current = commit.parents[0] if commit.parents else None

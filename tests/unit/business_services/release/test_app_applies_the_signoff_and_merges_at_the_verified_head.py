@@ -132,11 +132,10 @@ def test_an_attestation_that_does_not_match_its_digest_is_not_signed() -> None:
 
 
 @pytest.mark.req("REQ-63")
-def test_a_void_recorded_after_the_decision_ends_it_and_an_earlier_one_does_not() -> None:
-    decision = _decided(APPROVE_CHOICE)
-    later = decision.model_copy(update={"decided_at": datetime(2026, 11, 29, tzinfo=UTC)})
-    earlier = decision.model_copy(update={"decided_at": datetime(2026, 11, 27, tzinfo=UTC)})
-    assert void_after_decision(decision, [None, None]) is None
-    assert void_after_decision(decision, [earlier, None]) is None
-    reason = void_after_decision(decision, [None, later])
+def test_a_void_later_in_the_ledger_than_the_decision_ends_it_and_an_earlier_one_does_not() -> None:
+    assert void_after_decision(10, [None, None]) is None
+    assert void_after_decision(10, [4, None]) is None
+    reason = void_after_decision(10, [None, 11])
     assert reason is not None and "decide again" in reason
+    # Only the ledger's order counts: a decision appended again after the void stands.
+    assert void_after_decision(12, [None, 11]) is None

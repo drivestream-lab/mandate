@@ -25,7 +25,7 @@ from src.engine.gates.unguarded_merge_rules import unreadable_ruleset
 from src.infra_services.base_infra_service import BaseInfraService
 from src.logging import get_logger
 from src.models.gate_models import PullRequestRef
-from src.models.sweep_models import BranchCommit, HeadStatus, PullMerge
+from src.models.sweep_models import BranchCommit, CompareResult, HeadStatus, PullMerge
 from src.models.signoff_models import (
     GATE_DECISION_CONTEXT,
     GateDecisionStateType,
@@ -141,6 +141,12 @@ class _ClosedPull(_Record):
     number: int
     merged_at: datetime | None
     merge_commit_sha: str | None
+
+
+class _Compare(_Record):
+    status: str
+    ahead_by: int
+    merge_base_commit: _Head
 
 
 class _Branch(_Record):
@@ -423,6 +429,15 @@ class GitHubAppService(BaseInfraService):
         path = f"/repos/{self._settings.owner}/{repo}/commits/{sha}"
         item = self._parse(_CommitItem, await self._get(path))
         return BranchCommit(sha=item.sha, parents=tuple(parent.sha for parent in item.parents))
+
+    async def compare(self, repo: str, base: str, head: str) -> CompareResult:
+        """How head stands against base (identical, ahead, behind or diverged), by how many
+        commits, and where they last agreed."""
+        path = f"/repos/{self._settings.owner}/{repo}/compare/{base}...{head}"
+        item = self._parse(_Compare, await self._get(path, {"per_page": 1}))
+        return CompareResult(
+            status=item.status, ahead_by=item.ahead_by, merge_base=item.merge_base_commit.sha
+        )
 
     async def merged_pulls_with_commits(
         self, repo: str, branch: str, shas: frozenset[str]

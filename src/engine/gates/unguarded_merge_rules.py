@@ -17,11 +17,13 @@ from datetime import datetime
 from pydantic import JsonValue
 
 from src.models.sweep_models import (
+    CompareResult,
     GovernanceFinding,
     HeadStatus,
     MergeObservation,
     MergeVerdictType,
     RepoBaseline,
+    WalkPlan,
 )
 
 PASSING_STATE = "success"
@@ -39,14 +41,37 @@ _VOLATILE_KEYS = frozenset({"updated_at", "created_at", "node_id", "_links"})
 url or ending in _url is dropped too). The ruleset's own id is kept in the baseline."""
 
 
-def walk_complete(current: str | None, checkpoint: str | None, steps: int, max_depth: int) -> bool:
-    """True when the first-parent walk should stop: it reached the checkpoint or ran out of
-    parents, or, only for a first sweep that has no checkpoint, went `max_depth` landings back.
+def walk_complete(current: str | None, stop_at: str | None, steps: int, limit: int) -> bool:
+    """True when the first-parent walk should stop: it reached the commit it walks to, ran out of
+    parents, or took as many steps as GitHub's compare says the tip is ahead (or, for a first
+    sweep with no checkpoint, as many as the configured depth)."""
+    return current is None or current == stop_at or steps >= limit
 
-    Once a checkpoint exists the walk goes all the way to it, however many landings came in."""
-    if current is None or current == checkpoint:
-        return True
-    return checkpoint is None and steps >= max_depth
+
+def plan_walk(compare: CompareResult | None, checkpoint: str) -> WalkPlan | None:
+    """What to walk given how the tip compares with the checkpoint; None when the answer is not
+    one this knows (an error or an unknown status), which fails closed.
+
+    identical: nothing to judge. ahead: from the tip to the checkpoint, at most ahead_by steps.
+    behind or diverged: the branch was rewritten; judge from the merge base to the tip, at most
+    ahead_by steps, after recording the rewrite.
+    """
+    if compare is None:
+        return None
+    if compare.status == "identical":
+        return WalkPlan(nothing_to_judge=True, rewritten=False, stop_at=checkpoint, limit=0)
+    if compare.status == "ahead":
+        return WalkPlan(
+            nothing_to_judge=False, rewritten=False, stop_at=checkpoint, limit=compare.ahead_by
+        )
+    if compare.status in ("behind", "diverged"):
+        return WalkPlan(
+            nothing_to_judge=False,
+            rewritten=True,
+            stop_at=compare.merge_base,
+            limit=compare.ahead_by,
+        )
+    return None
 
 
 def seed_allowed(existing_checkpoint: str | None) -> bool:
@@ -54,10 +79,10 @@ def seed_allowed(existing_checkpoint: str | None) -> bool:
     return existing_checkpoint is None
 
 
-def checkpoint_reached(last: str | None, checkpoint: str | None) -> bool:
-    """A later sweep must end its walk at the checkpoint; anything else means the branch's own
-    line no longer leads to it (a rewrite) or more landings than the depth allows."""
-    return checkpoint is None or last == checkpoint
+def checkpoint_reached(last: str | None, stop_at: str | None) -> bool:
+    """A walk bounded by compare must end on the commit it walks to; anything else means the
+    branch's own first-parent line does not lead there."""
+    return stop_at is None or last == stop_at
 
 
 def revert_due(revertable: bool, revert_recorded: bool) -> bool:

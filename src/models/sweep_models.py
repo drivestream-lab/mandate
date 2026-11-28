@@ -21,6 +21,28 @@ class BranchCommit(BaseModel):
     parents: tuple[str, ...]
 
 
+class CompareResult(BaseModel):
+    """How a branch's tip stands against the checkpoint, as GitHub's compare reports it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: str
+    ahead_by: int = Field(ge=0)
+    merge_base: str = Field(pattern=_SHA)
+
+
+class WalkPlan(BaseModel):
+    """What a sweep with a checkpoint walks: back from the tip to `stop_at`, at most `limit`
+    first parents, and whether the branch was rewritten since the checkpoint."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    nothing_to_judge: bool
+    rewritten: bool
+    stop_at: str | None
+    limit: int = Field(ge=0)
+
+
 class PullMerge(BaseModel):
     """A merged pull request that GitHub associates with a commit."""
 

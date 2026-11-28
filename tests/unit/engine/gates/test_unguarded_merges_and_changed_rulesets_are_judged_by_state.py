@@ -12,6 +12,7 @@ from src.engine.gates.unguarded_merge_rules import (
     revert_due,
     seed_allowed,
     unreadable_ruleset,
+    plan_walk,
     walk_complete,
     checkpoint_reached,
     passing_check,
@@ -19,6 +20,7 @@ from src.engine.gates.unguarded_merge_rules import (
     ruleset_digest,
 )
 from src.models.sweep_models import (
+    CompareResult,
     HeadStatus,
     MergeObservation,
     MergeVerdictType,
@@ -210,13 +212,50 @@ def test_a_landing_that_is_not_a_merged_pull_request_is_a_breach_even_for_a_name
 
 
 @pytest.mark.req("REQ-122")
-def test_the_walk_stops_on_the_checkpoint_or_at_the_depth_and_only_the_checkpoint_counts() -> None:
+def test_the_walk_stops_on_what_it_walks_to_or_at_the_bound() -> None:
     assert walk_complete("a", "a", 0, 5) and walk_complete(None, "a", 0, 5)
-    assert walk_complete("b", None, 5, 5) and not walk_complete("b", None, 4, 5)
-    # With a checkpoint the walk has no depth limit: 500 landings on, it still goes on.
-    assert not walk_complete("b", "a", 500, 5)
+    assert walk_complete("b", "a", 3, 3) and not walk_complete("b", "a", 2, 3)
     assert checkpoint_reached("a", "a") and checkpoint_reached("zzz", None)
     assert not checkpoint_reached("b", "a") and not checkpoint_reached(None, "a")
+
+
+_CP, _TIP, _BASE = "1" * 40, "2" * 40, "3" * 40
+
+
+@pytest.mark.req("REQ-122")
+def test_identical_judges_nothing_and_ahead_walks_to_the_checkpoint_by_ahead_by() -> None:
+    same = plan_walk(CompareResult(status="identical", ahead_by=0, merge_base=_CP), _CP)
+    assert same is not None and same.nothing_to_judge and not same.rewritten
+    ahead = plan_walk(CompareResult(status="ahead", ahead_by=500, merge_base=_CP), _CP)
+    assert ahead is not None and not ahead.nothing_to_judge and not ahead.rewritten
+    assert ahead.stop_at == _CP and ahead.limit == 500
+
+
+@pytest.mark.req("REQ-122")
+def test_a_rewrite_is_recorded_and_the_landings_above_the_merge_base_are_still_judged() -> None:
+    for status in ("diverged", "behind"):
+        plan = plan_walk(CompareResult(status=status, ahead_by=2, merge_base=_BASE), _CP)
+        assert plan is not None and plan.rewritten and not plan.nothing_to_judge
+        assert plan.stop_at == _BASE and plan.limit == 2
+    # an unguarded merge above the merge base is judged as any other landing
+    merge = MergeObservation(
+        repo="r",
+        branch="develop",
+        merge_commit=_TIP,
+        head_sha=_TIP,
+        merged_by="someone",
+        merged_at=_T,
+        pull_number=3,
+        node_id="PR_x",
+        statuses=(),
+    )
+    assert judge_merge(merge, _APP, frozenset(), frozenset()) is MergeVerdictType.BREACH
+
+
+@pytest.mark.req("REQ-122")
+def test_a_comparison_that_failed_or_is_not_understood_judges_nothing() -> None:
+    assert plan_walk(None, _CP) is None
+    assert plan_walk(CompareResult(status="surprising", ahead_by=1, merge_base=_CP), _CP) is None
 
 
 @pytest.mark.req("REQ-122")

@@ -234,6 +234,17 @@ class LedgerAppendService(BaseBusinessService):
             found = await self._repository.find_decisions(session, actor, role, target_version)
         return [_record_of(entry) for entry in found]
 
+    async def latest_decision_sequence(
+        self, actor: str, role: str, target_version: str
+    ) -> int | None:
+        """The ledger sequence of the holder's latest word on this role and version, or None.
+        Sequence is the order of the ledger, which no clock or timestamp can change."""
+        async with self._postgres.get_session() as session:
+            existing = await self._repository.find_latest_decision(
+                session, actor, role, target_version
+            )
+        return None if existing is None else existing.sequence
+
     async def verify(self, anchor: ChainAnchor | None = None) -> ChainVerification:
         """Read the whole chain and check it, against the anchor when one is given."""
         async with self._postgres.get_session() as session:

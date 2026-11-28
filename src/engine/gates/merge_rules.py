@@ -132,16 +132,15 @@ def decided_attestation(record: DecisionRecord | None) -> Attestation | str:
         return "the attestation in the deciding role's decision is not readable"
 
 
-def void_after_decision(
-    decision: DecisionRecord, voids: Sequence[DecisionRecord | None]
-) -> str | None:
+def void_after_decision(decision_sequence: int, void_sequences: Sequence[int | None]) -> str | None:
     """Why the deciding role's decision no longer stands, or None.
 
-    A void Mandate recorded for this gate and head after the decision ended it, even if the head
-    has since come back (a force-push to the decided commit): the deciding role must decide again.
+    A void Mandate recorded for this gate and head after the decision (a later ledger sequence,
+    never a timestamp) ended it, even if the head has since come back (a force-push to the decided
+    commit): the deciding role must decide again.
     """
-    for void in voids:
-        if void is not None and void.decided_at > decision.decided_at:
+    for void in void_sequences:
+        if void is not None and void > decision_sequence:
             return (
                 "the signoff on this head was voided after the deciding role decided; "
                 "the deciding role must decide again"
